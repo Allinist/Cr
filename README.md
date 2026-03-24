@@ -7,6 +7,7 @@ code projection flow described in
 ## Current scope
 
 - `intranet/build_manifest.py`: scan files and generate stable page/slice metadata
+- `intranet/scan_project_tree.py`: scan all directories, file types, and files under a project
 - `intranet/render_pages.py`: render pages with `tkinter` or stdout fallback
 - `intranet/list_files.sh`: simple file discovery helper
 - `intranet/compute_diff.sh`: thin wrapper around `git diff --name-status`
@@ -38,6 +39,10 @@ python3 intranet/build_manifest.py \
   --output /tmp/manifest.json \
   --branch feature/demo \
   --commit abc1234
+
+python3 intranet/scan_project_tree.py \
+  --root /repo/spc-cloud \
+  --output /tmp/project_scan.json
 
 python3 intranet/render_pages.py \
   --manifest /tmp/manifest.json \
