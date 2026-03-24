@@ -1,0 +1,16 @@
+{
+  "repo_root": ".",
+  "repo_name": "spc-cloud",
+  "branch": "feature/example",
+  "commit": "abc1234",
+  "page_lines": 40,
+  "page_cols": 110,
+  "mode": "full",
+  "exclude_dirs": [
+    ".git",
+    "target",
+    "build",
+    "dist",
+    "node_modules"
+  ]
+}
