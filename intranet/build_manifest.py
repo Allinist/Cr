@@ -16,6 +16,8 @@ import os
 import sys
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
+from project_registry import DEFAULT_CONFIG_PATH, resolve_paths_from_project
+
 
 TEXT_EXTENSIONS = {
     ".java": "java",
@@ -48,7 +50,22 @@ DEFAULT_EXCLUDE_DIRS = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build projection manifest.")
-    parser.add_argument("--repo-root", default=".", help="Repository root path.")
+    parser.add_argument("--project", default=None, help="Registered project name from config/projects.json.")
+    parser.add_argument(
+        "--config",
+        default=DEFAULT_CONFIG_PATH,
+        help="Project registry JSON path.",
+    )
+    parser.add_argument(
+        "--repo-root",
+        default=".",
+        help="Stable repository root used to build relative paths.",
+    )
+    parser.add_argument(
+        "--scan-root",
+        default=None,
+        help="Actual directory to scan. Defaults to repo-root.",
+    )
     parser.add_argument("--output", required=True, help="Output manifest JSON path.")
     parser.add_argument("--page-lines", type=int, default=40, help="Lines per page.")
     parser.add_argument("--page-cols", type=int, default=110, help="Visible columns per slice.")
@@ -135,6 +152,7 @@ def classify_path(rel_path: str, include_globs: Sequence[str]) -> Tuple[str, Opt
 
 def iter_candidate_files(
     repo_root: str,
+    scan_root: str,
     exclude_dirs: Sequence[str],
     only_paths: Sequence[str],
     include_globs: Sequence[str],
@@ -143,7 +161,7 @@ def iter_candidate_files(
     exclude_set = set(DEFAULT_EXCLUDE_DIRS)
     exclude_set.update(exclude_dirs)
 
-    for current_root, dir_names, file_names in os.walk(repo_root):
+    for current_root, dir_names, file_names in os.walk(scan_root):
         dir_names[:] = [item for item in dir_names if item not in exclude_set]
         for file_name in sorted(file_names):
             abs_path = os.path.join(current_root, file_name)
@@ -269,14 +287,29 @@ def ensure_parent_dir(path: str) -> None:
 
 
 def build_manifest(args: argparse.Namespace) -> Dict[str, object]:
-    repo_root = os.path.abspath(args.repo_root)
-    repo_name = args.repo_name or os.path.basename(repo_root)
+    resolved = resolve_paths_from_project(
+        project_name=args.project,
+        config_path=args.config,
+        explicit_root=args.repo_root,
+        explicit_scan_root=args.scan_root,
+        explicit_repo_name=args.repo_name,
+        explicit_exclude_dirs=args.exclude_dir,
+    )
+    repo_root = os.path.abspath(resolved["project_root"])
+    scan_root = os.path.abspath(resolved["scan_root"])
+    if os.path.commonpath([repo_root, scan_root]) != repo_root:
+        raise ValueError("scan-root must be inside repo-root")
+    repo_name = str(resolved["project_name"] or os.path.basename(repo_root))
+    scan_root_rel = normalize_path(os.path.relpath(scan_root, repo_root))
+    if scan_root_rel == ".":
+        scan_root_rel = "."
 
     text_files = []
     binary_files = []
     for abs_path, item_type, language in iter_candidate_files(
         repo_root=repo_root,
-        exclude_dirs=args.exclude_dir,
+        scan_root=scan_root,
+        exclude_dirs=resolved["exclude_dirs"],
         only_paths=args.only,
         include_globs=args.include_glob,
     ):
@@ -300,7 +333,11 @@ def build_manifest(args: argparse.Namespace) -> Dict[str, object]:
     total_pages = sum(len(item["pages"]) for item in text_files)
     return {
         "version": 1,
+        "project_name": repo_name,
+        "config_path": normalize_path(os.path.abspath(args.config)),
         "repo_root": normalize_path(repo_root),
+        "scan_root": normalize_path(scan_root),
+        "scan_root_relative": scan_root_rel,
         "repo_name": repo_name,
         "branch": args.branch,
         "commit": args.commit,

@@ -1,0 +1,28 @@
+{
+  "projects": {
+    "spc-cloud": {
+      "repo_name": "spc-cloud",
+      "project_root": "/repo/spc-cloud",
+      "scan_root": "/repo/spc-cloud",
+      "exclude_dirs": [
+        ".git",
+        "target",
+        "build",
+        "dist",
+        "node_modules"
+      ]
+    },
+    "spc-order": {
+      "repo_name": "spc-order",
+      "project_root": "/repo/spc-order",
+      "scan_root": "/repo/spc-order",
+      "exclude_dirs": [
+        ".git",
+        "target",
+        "build",
+        "dist",
+        "node_modules"
+      ]
+    }
+  }
+}

@@ -7,6 +7,7 @@ code projection flow described in
 ## Current scope
 
 - `intranet/build_manifest.py`: scan files and generate stable page/slice metadata
+- `intranet/project_registry.py`: resolve project roots from a multi-project config
 - `intranet/scan_project_tree.py`: scan all directories, file types, and files under a project
 - `intranet/render_pages.py`: render pages with `tkinter` or stdout fallback
 - `intranet/list_files.sh`: simple file discovery helper
@@ -34,14 +35,20 @@ pip install -r requirements-ocr.txt
 ## Example
 
 ```bash
+cp config/projects.example.json config/projects.json
+
 python3 intranet/build_manifest.py \
-  --repo-root /repo/spc-cloud \
+  --project spc-cloud \
+  --config config/projects.json \
+  --scan-root /repo/spc-cloud/spc-modules-system \
   --output /tmp/manifest.json \
   --branch feature/demo \
   --commit abc1234
 
 python3 intranet/scan_project_tree.py \
-  --root /repo/spc-cloud \
+  --project spc-cloud \
+  --config config/projects.json \
+  --scan-root /repo/spc-cloud/spc-modules-system \
   --output /tmp/project_scan.json
 
 python3 intranet/render_pages.py \
@@ -64,3 +71,5 @@ python external/sync_manager.py \
 - The manifest keeps full page bodies for now so the first version stays simple.
 - Diff-aware page selection is still the next major step.
 - The external OCR flow is now scaffolded, but language-aware repair and OBS authentication are still minimal.
+- Use `config/projects.json` to register multiple projects, then switch with `--project`.
+- `scan-root` can still be overridden per run when you only want to scan one module.

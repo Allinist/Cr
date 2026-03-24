@@ -17,6 +17,8 @@ import sys
 from collections import defaultdict
 from typing import Dict, List
 
+from project_registry import DEFAULT_CONFIG_PATH, resolve_paths_from_project
+
 
 DEFAULT_EXCLUDE_DIRS = {
     ".git",
@@ -33,7 +35,22 @@ DEFAULT_EXCLUDE_DIRS = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Scan project folders and file types.")
-    parser.add_argument("--root", default=".", help="Project root directory.")
+    parser.add_argument("--project", default=None, help="Registered project name from config/projects.json.")
+    parser.add_argument(
+        "--config",
+        default=DEFAULT_CONFIG_PATH,
+        help="Project registry JSON path.",
+    )
+    parser.add_argument(
+        "--project-root",
+        default=".",
+        help="Stable project root used to build relative paths.",
+    )
+    parser.add_argument(
+        "--scan-root",
+        default=None,
+        help="Actual directory to scan. Defaults to project-root.",
+    )
     parser.add_argument("--output", required=True, help="Output JSON path.")
     parser.add_argument(
         "--exclude-dir",
@@ -79,8 +96,12 @@ def build_directory_entry(rel_dir: str) -> Dict[str, object]:
     }
 
 
-def scan_project(root: str, exclude_dirs: List[str], include_hidden: bool) -> Dict[str, object]:
-    root = os.path.abspath(root)
+def scan_project(project_root: str, scan_root: str, exclude_dirs: List[str], include_hidden: bool) -> Dict[str, object]:
+    project_root = os.path.abspath(project_root)
+    scan_root = os.path.abspath(scan_root)
+    if os.path.commonpath([project_root, scan_root]) != project_root:
+        raise ValueError("scan-root must be inside project-root")
+
     exclude_set = set(DEFAULT_EXCLUDE_DIRS)
     exclude_set.update(exclude_dirs)
 
@@ -88,7 +109,11 @@ def scan_project(root: str, exclude_dirs: List[str], include_hidden: bool) -> Di
     directories: Dict[str, Dict[str, object]] = {}
     files: List[Dict[str, object]] = []
 
-    for current_root, dir_names, file_names in os.walk(root):
+    scan_root_rel = normalize_path(os.path.relpath(scan_root, project_root))
+    if scan_root_rel == ".":
+        scan_root_rel = "."
+
+    for current_root, dir_names, file_names in os.walk(scan_root):
         filtered_dirs = []
         for dir_name in sorted(dir_names):
             if dir_name in exclude_set:
@@ -98,7 +123,7 @@ def scan_project(root: str, exclude_dirs: List[str], include_hidden: bool) -> Di
             filtered_dirs.append(dir_name)
         dir_names[:] = filtered_dirs
 
-        rel_dir = normalize_path(os.path.relpath(current_root, root))
+        rel_dir = normalize_path(os.path.relpath(current_root, project_root))
         if rel_dir == ".":
             rel_dir = "."
         dir_entry = directories.setdefault(rel_dir, build_directory_entry(rel_dir))
@@ -108,7 +133,7 @@ def scan_project(root: str, exclude_dirs: List[str], include_hidden: bool) -> Di
             if not include_hidden and is_hidden_name(file_name):
                 continue
             abs_path = os.path.join(current_root, file_name)
-            rel_path = normalize_path(os.path.relpath(abs_path, root))
+            rel_path = normalize_path(os.path.relpath(abs_path, project_root))
             file_type = detect_file_type(file_name)
             size = os.path.getsize(abs_path)
 
@@ -137,7 +162,9 @@ def scan_project(root: str, exclude_dirs: List[str], include_hidden: bool) -> Di
     files.sort(key=lambda item: item["path"])
 
     return {
-        "root": normalize_path(root),
+        "project_root": normalize_path(project_root),
+        "scan_root": normalize_path(scan_root),
+        "scan_root_relative": scan_root_rel,
         "directory_count": len(sorted_dirs),
         "file_count": len(files),
         "file_types": sorted_types,
@@ -148,7 +175,21 @@ def scan_project(root: str, exclude_dirs: List[str], include_hidden: bool) -> Di
 
 def main() -> int:
     args = parse_args()
-    payload = scan_project(args.root, args.exclude_dir, args.include_hidden)
+    resolved = resolve_paths_from_project(
+        project_name=args.project,
+        config_path=args.config,
+        explicit_root=args.project_root,
+        explicit_scan_root=args.scan_root,
+        explicit_exclude_dirs=args.exclude_dir,
+    )
+    payload = scan_project(
+        resolved["project_root"],
+        resolved["scan_root"],
+        resolved["exclude_dirs"],
+        args.include_hidden,
+    )
+    payload["project_name"] = resolved["project_name"]
+    payload["config_path"] = normalize_path(os.path.abspath(args.config))
     ensure_parent_dir(args.output)
     with open(args.output, "w", encoding="utf-8", newline="\n") as handle:
         json.dump(payload, handle, indent=2, ensure_ascii=False)
