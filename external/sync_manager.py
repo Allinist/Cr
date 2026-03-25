@@ -18,7 +18,7 @@ import subprocess
 import sys
 from typing import Dict, List
 
-from page_detector import is_last_page, page_identity, parse_header
+from page_detector import extract_body_region, has_page_markers, is_last_page, page_identity, parse_header
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,12 +52,36 @@ def write_json(path: str, payload: Dict[str, object]) -> None:
 
 
 def concat_ocr_text(payload: Dict[str, object]) -> str:
+    regions = payload.get("regions", {})
+    if isinstance(regions, dict):
+        header_text = str(regions.get("header", {}).get("text", "")).strip()
+        body_text = str(regions.get("body", {}).get("text", "")).strip()
+        footer_text = str(regions.get("footer", {}).get("text", "")).strip()
+        region_parts = [part for part in [header_text, body_text, footer_text] if part]
+        if region_parts:
+            return "\n".join(region_parts)
     lines = []
     for entry in payload.get("entries", []):
         text = str(entry.get("text", "")).strip()
         if text:
             lines.append(text)
     return "\n".join(lines)
+
+
+def analyze_ocr_text(ocr_payload: Dict[str, object]) -> Dict[str, object]:
+    full_text = concat_ocr_text(ocr_payload)
+    header = parse_header(full_text)
+    body_text = str(ocr_payload.get("regions", {}).get("body", {}).get("text", "")).strip() or extract_body_region(full_text)
+    header_text = str(ocr_payload.get("regions", {}).get("header", {}).get("text", "")).strip()
+    footer_text = str(ocr_payload.get("regions", {}).get("footer", {}).get("text", "")).strip()
+    return {
+        "full_text": full_text,
+        "header_text": header_text,
+        "body_text": body_text,
+        "footer_text": footer_text,
+        "header": header,
+        "has_page_markers": has_page_markers(full_text),
+    }
 
 
 def load_state(path: str) -> Dict[str, object]:
@@ -170,7 +194,8 @@ def main() -> int:
     run_subprocess([sys.executable, os.path.join("external", "code_rebuilder.py"), "--input", ocr_json, "--output", rebuilt_json])
 
     ocr_payload = load_json(ocr_json)
-    header = parse_header(concat_ocr_text(ocr_payload))
+    analyzed = analyze_ocr_text(ocr_payload)
+    header = analyzed["header"]
     state = load_state(state_json)
     state = update_state(state, args.image, header, rebuilt_json)
     write_json(state_json, state)
@@ -185,6 +210,10 @@ def main() -> int:
         "image": args.image,
         "header": header,
         "page_identity": page_identity(header),
+        "has_page_markers": analyzed["has_page_markers"],
+        "header_text": analyzed["header_text"],
+        "body_text_preview": analyzed["body_text"][:500],
+        "footer_text": analyzed["footer_text"],
         "ocr_json": ocr_json,
         "rebuilt_json": rebuilt_json,
         "state_json": state_json,

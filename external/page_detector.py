@@ -9,7 +9,7 @@ This version focuses on metadata parsing from OCR text rather than pixel-level
 from __future__ import annotations
 
 import re
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 
 HEADER_PATTERNS = {
@@ -19,10 +19,24 @@ HEADER_PATTERNS = {
     "lines": re.compile(r"^LINES=(\d+)-(\d+)$", re.MULTILINE),
 }
 
+PAGE_BEGIN_PATTERN = re.compile(
+    r"\[PAGE-BEGIN\]\s+file=(.+?)\s+page=(\d+)/(\d+)\s+lines=(\d+)-(\d+)"
+)
+PAGE_END_PATTERN = re.compile(
+    r"\[PAGE-END\]\s+file=(.+?)\s+page=(\d+)/(\d+)\s+lines=(\d+)-(\d+)"
+)
+
 
 def parse_header(text: str) -> Dict[str, object]:
     result: Dict[str, object] = {}
+    marker_match = PAGE_BEGIN_PATTERN.search(text)
+    if marker_match:
+        result["file"] = marker_match.group(1).strip()
+        result["page"] = (int(marker_match.group(2)), int(marker_match.group(3)))
+        result["lines"] = (int(marker_match.group(4)), int(marker_match.group(5)))
     for key, pattern in HEADER_PATTERNS.items():
+        if key in result:
+            continue
         match = pattern.search(text)
         if not match:
             continue
@@ -31,6 +45,22 @@ def parse_header(text: str) -> Dict[str, object]:
         else:
             result[key] = match.group(1).strip()
     return result
+
+
+def has_page_markers(text: str) -> bool:
+    return PAGE_BEGIN_PATTERN.search(text) is not None and PAGE_END_PATTERN.search(text) is not None
+
+
+def extract_body_region(text: str) -> str:
+    begin_match = PAGE_BEGIN_PATTERN.search(text)
+    end_match = PAGE_END_PATTERN.search(text)
+    start_index = begin_match.end() if begin_match else 0
+    end_index = end_match.start() if end_match else len(text)
+    return text[start_index:end_index].strip("\n")
+
+
+def split_lines(text: str) -> List[str]:
+    return [line.rstrip("\r") for line in text.splitlines()]
 
 
 def page_identity(header: Dict[str, object]) -> Optional[str]:

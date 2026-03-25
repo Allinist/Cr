@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
 from typing import Dict, List, Set, Tuple
@@ -40,6 +41,23 @@ def parse_args() -> argparse.Namespace:
         "--show-status",
         action="store_true",
         help="Show a short status line after each page render.",
+    )
+    parser.add_argument(
+        "--top-padding",
+        type=int,
+        default=1,
+        help="Blank lines inserted before each page.",
+    )
+    parser.add_argument(
+        "--bottom-padding",
+        type=int,
+        default=1,
+        help="Blank lines inserted after each page.",
+    )
+    parser.add_argument(
+        "--check-width",
+        action="store_true",
+        help="Warn when terminal width is smaller than the rendered page width.",
     )
     return parser.parse_args()
 
@@ -112,6 +130,18 @@ def format_page(page: Dict[str, object]) -> str:
     return "\n".join(header + body + footer)
 
 
+def terminal_width() -> int:
+    try:
+        return shutil.get_terminal_size((80, 24)).columns
+    except Exception:
+        return 80
+
+
+def page_display_width(page: Dict[str, object]) -> int:
+    formatted = format_page(page)
+    return max(len(line) for line in formatted.splitlines())
+
+
 def clear_terminal() -> None:
     if os.name == "nt":
         os.system("cls")
@@ -125,14 +155,51 @@ def render_terminal(
     dwell_ms: int,
     clear_screen_enabled: bool = True,
     show_status: bool = False,
+    top_padding: int = 1,
+    bottom_padding: int = 1,
+    check_width: bool = False,
 ) -> int:
+    warned_width = False
     for index, page in enumerate(pages, 1):
         if clear_screen_enabled:
             clear_terminal()
         elif index > 1:
             sys.stdout.write("\n")
+        if check_width and not warned_width:
+            required_width = page_display_width(page)
+            current_width = terminal_width()
+            if current_width < required_width:
+                sys.stdout.write(
+                    "[warn] terminal width=%s, recommended>=%s, some code may wrap visually.\n"
+                    % (current_width, required_width)
+                )
+                warned_width = True
+        if top_padding > 0:
+            sys.stdout.write("\n" * top_padding)
+        sys.stdout.write(
+            "[PAGE-BEGIN] file=%s page=%s/%s lines=%s-%s\n"
+            % (
+                page.get("file", "unknown"),
+                page.get("page", "?"),
+                page.get("page_total", "?"),
+                page.get("start_line", "?"),
+                page.get("end_line", "?"),
+            )
+        )
         sys.stdout.write(format_page(page))
         sys.stdout.write("\n")
+        sys.stdout.write(
+            "[PAGE-END] file=%s page=%s/%s lines=%s-%s\n"
+            % (
+                page.get("file", "unknown"),
+                page.get("page", "?"),
+                page.get("page_total", "?"),
+                page.get("start_line", "?"),
+                page.get("end_line", "?"),
+            )
+        )
+        if bottom_padding > 0:
+            sys.stdout.write("\n" * bottom_padding)
         if show_status:
             sys.stdout.write(
                 "[%s/%s] %s\n" % (index, len(pages), page.get("file", "unknown"))
@@ -158,6 +225,9 @@ def main() -> int:
         args.dwell_ms,
         clear_screen_enabled=not args.no_clear_screen,
         show_status=args.show_status,
+        top_padding=args.top_padding,
+        bottom_padding=args.bottom_padding,
+        check_width=args.check_width,
     )
 
 

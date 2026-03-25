@@ -16,6 +16,8 @@ import re
 import sys
 from typing import Dict, List, Tuple
 
+from page_detector import extract_body_region
+
 
 LINE_PATTERN = re.compile(r"^\s*(\d+)\s{2}(.*)$")
 CONTINUATION_PATTERN = re.compile(r"^\s{5}\s{2}(.*)$")
@@ -37,14 +39,25 @@ def ensure_parent(path: str) -> None:
 def load_entries(path: str) -> List[Dict[str, object]]:
     with open(path, "r", encoding="utf-8") as handle:
         payload = json.load(handle)
+    if payload.get("regions", {}).get("body", {}).get("entries"):
+        return payload["regions"]["body"]["entries"]
     return payload.get("entries", [])
 
 
 def parse_body_lines(entries: List[Dict[str, object]]) -> List[Tuple[int, str]]:
     logical_lines: List[List[object]] = []
     for entry in entries:
-        raw_text = str(entry.get("text", ""))
+        raw_text = extract_body_region(str(entry.get("text", "")))
         for text in raw_text.splitlines():
+            stripped = text.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("[PAGE-BEGIN]") or stripped.startswith("[PAGE-END]"):
+                continue
+            if stripped.startswith("FILE=") or stripped.startswith("NAME=") or stripped.startswith("PAGE=") or stripped.startswith("LINES="):
+                continue
+            if set(stripped) == {"="}:
+                continue
             match = LINE_PATTERN.match(text)
             if match:
                 logical_lines.append([int(match.group(1)), match.group(2)])

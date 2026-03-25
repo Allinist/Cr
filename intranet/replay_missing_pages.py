@@ -26,6 +26,23 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Show a short status line after each page render.",
     )
+    parser.add_argument(
+        "--top-padding",
+        type=int,
+        default=1,
+        help="Blank lines inserted before each page.",
+    )
+    parser.add_argument(
+        "--bottom-padding",
+        type=int,
+        default=1,
+        help="Blank lines inserted after each page.",
+    )
+    parser.add_argument(
+        "--check-width",
+        action="store_true",
+        help="Warn when terminal width is smaller than the rendered page width.",
+    )
     return parser.parse_args()
 
 
@@ -42,6 +59,9 @@ def main() -> int:
         args.dwell_ms,
         clear_screen_enabled=not args.no_clear_screen,
         show_status=args.show_status,
+        top_padding=args.top_padding,
+        bottom_padding=args.bottom_padding,
+        check_width=args.check_width,
     )
 
 

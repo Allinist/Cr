@@ -54,12 +54,14 @@ python3 intranet/scan_project_tree.py \
 python3 intranet/render_pages.py \
   --manifest /tmp/manifest.json \
   --limit 3 \
-  --dwell-ms 100
+  --dwell-ms 100 \
+  --check-width
 
 python3 intranet/replay_missing_pages.py \
   --manifest /tmp/manifest.json \
   --report external_out/recognition_result_report.json \
-  --dwell-ms 100
+  --dwell-ms 100 \
+  --check-width
 
 python external/ocr_runner.py \
   --image capture.png \
@@ -83,3 +85,6 @@ python external/sync_manager.py \
 - When the external side sees the last page of a file, it writes `recognition_result_report.json` with recognized and missing pages.
 - The final report now includes `replay_requests`, and the intranet side can replay only those missing pages.
 - The intranet renderer no longer depends on `tkinter`; it uses terminal clear-screen paging only.
+- The terminal renderer supports fixed top/bottom padding, paired `[PAGE-BEGIN]` / `[PAGE-END]` markers, and width warnings for more stable capture.
+- The external side now prioritizes `[PAGE-BEGIN]` / `[PAGE-END]` markers and only falls back to header-field parsing when needed.
+- The OCR runner now performs basic image preprocessing and recognizes header/body/footer regions separately to reduce terminal noise.
