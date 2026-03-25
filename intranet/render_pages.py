@@ -16,10 +16,33 @@ import sys
 import time
 from typing import Dict, List, Set, Tuple
 
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(CURRENT_DIR)
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from shared.projection_settings import get_render_settings, load_projection_settings
+
+
+ARG_DEFAULTS = {
+    "dwell_ms": 1800,
+    "no_clear_screen": False,
+    "show_status": False,
+    "top_padding": 1,
+    "bottom_padding": 1,
+    "check_width": False,
+    "line_numbers": "none",
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Render projection manifest pages.")
     parser.add_argument("--manifest", required=True, help="Input manifest JSON path.")
+    parser.add_argument(
+        "--projection-config",
+        default=None,
+        help="Shared projection config JSON path.",
+    )
     parser.add_argument("--dwell-ms", type=int, default=1800, help="Delay per page.")
     parser.add_argument(
         "--limit",
@@ -59,7 +82,37 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Warn when terminal width is smaller than the rendered page width.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--line-numbers",
+        choices=("all", "non-empty", "none"),
+        default="none",
+        help=(
+            "Line number display mode: all=show on every row, "
+            "non-empty=hide on blank rows, none=hide on all rows."
+        ),
+    )
+    args = parser.parse_args()
+    apply_projection_defaults(args)
+    return args
+
+
+def apply_projection_defaults(args: argparse.Namespace) -> None:
+    config = load_projection_settings(args.projection_config)
+    settings = get_render_settings(config)
+    if args.dwell_ms == ARG_DEFAULTS["dwell_ms"]:
+        args.dwell_ms = int(settings.get("dwell_ms", args.dwell_ms))
+    if args.no_clear_screen == ARG_DEFAULTS["no_clear_screen"]:
+        args.no_clear_screen = not bool(settings.get("clear_screen_enabled", True))
+    if args.show_status == ARG_DEFAULTS["show_status"]:
+        args.show_status = bool(settings.get("show_status", args.show_status))
+    if args.top_padding == ARG_DEFAULTS["top_padding"]:
+        args.top_padding = int(settings.get("top_padding", args.top_padding))
+    if args.bottom_padding == ARG_DEFAULTS["bottom_padding"]:
+        args.bottom_padding = int(settings.get("bottom_padding", args.bottom_padding))
+    if args.check_width == ARG_DEFAULTS["check_width"]:
+        args.check_width = bool(settings.get("check_width", args.check_width))
+    if args.line_numbers == ARG_DEFAULTS["line_numbers"]:
+        args.line_numbers = str(settings.get("line_numbers", args.line_numbers))
 
 
 def load_pages(manifest_path: str) -> List[Dict[str, object]]:
@@ -111,7 +164,7 @@ def filter_pages_by_missing_report(pages: List[Dict[str, object]], report_path: 
     return filtered
 
 
-def format_page(page: Dict[str, object]) -> str:
+def format_page(page: Dict[str, object], line_numbers: str = "none") -> str:
     divider = "=" * 72
     header = [
         divider,
@@ -124,8 +177,15 @@ def format_page(page: Dict[str, object]) -> str:
     body = []
     for row in pad_visual_rows(page):
         display_line_no = row.get("display_line_no")
-        line_prefix = "" if display_line_no is None else str(display_line_no)
-        body.append("%5s  %s" % (line_prefix, row.get("text", "")))
+        text = str(row.get("text", ""))
+        if line_numbers == "all":
+            line_prefix = "" if display_line_no is None else str(display_line_no)
+            body.append("%5s  %s" % (line_prefix, text))
+        elif line_numbers == "non-empty":
+            line_prefix = "" if (display_line_no is None or not text) else str(display_line_no)
+            body.append("%5s  %s" % (line_prefix, text))
+        else:
+            body.append("%5s  %s" % ("", text))
     footer = [divider]
     return "\n".join(header + body + footer)
 
@@ -137,8 +197,8 @@ def terminal_width() -> int:
         return 80
 
 
-def page_display_width(page: Dict[str, object]) -> int:
-    formatted = format_page(page)
+def page_display_width(page: Dict[str, object], line_numbers: str = "none") -> int:
+    formatted = format_page(page, line_numbers=line_numbers)
     return max(len(line) for line in formatted.splitlines())
 
 
@@ -153,6 +213,7 @@ def clear_terminal() -> None:
 def render_terminal(
     pages: List[Dict[str, object]],
     dwell_ms: int,
+    line_numbers: str = "none",
     clear_screen_enabled: bool = True,
     show_status: bool = False,
     top_padding: int = 1,
@@ -166,7 +227,7 @@ def render_terminal(
         elif index > 1:
             sys.stdout.write("\n")
         if check_width and not warned_width:
-            required_width = page_display_width(page)
+            required_width = page_display_width(page, line_numbers=line_numbers)
             current_width = terminal_width()
             if current_width < required_width:
                 sys.stdout.write(
@@ -186,7 +247,7 @@ def render_terminal(
                 page.get("end_line", "?"),
             )
         )
-        sys.stdout.write(format_page(page))
+        sys.stdout.write(format_page(page, line_numbers=line_numbers))
         sys.stdout.write("\n")
         sys.stdout.write(
             "[PAGE-END] file=%s page=%s/%s lines=%s-%s\n"
@@ -223,6 +284,7 @@ def main() -> int:
     return render_terminal(
         pages,
         args.dwell_ms,
+        line_numbers=args.line_numbers,
         clear_screen_enabled=not args.no_clear_screen,
         show_status=args.show_status,
         top_padding=args.top_padding,

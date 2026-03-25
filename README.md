@@ -55,6 +55,7 @@ python3 intranet/scan_project_tree.py \
 
 python3 intranet/render_pages.py \
   --manifest /tmp/manifest.json \
+  --projection-config config/projection.example.json \
   --limit 3 \
   --dwell-ms 100 \
   --check-width
@@ -70,8 +71,25 @@ python external/ocr_runner.py \
   --output external_out/ocr.json
 
 python external/sync_manager.py \
-  --image capture.png \
+  --projection-config config/projection.example.json \
+  --obs-source "Video Capture Device" \
   --workspace external_out
+
+bash external/run_ocr_server_gpu.sh ./screenshots/test.png ./external_out
+
+bash external/run_ocr_doc_gpu.sh ./screenshots/test.png ./external_out_doc
+
+bash external/run_template_roi_gpu.sh \
+  ./screenshots/test.png \
+  ./config/template_roi_layout.example.json \
+  ./external_out_template/roi_result.json \
+  ./external_out_template/debug
+
+bash external/run_template_roi_gpu.sh \
+  ./screenshots/test.png \
+  ./config/template_roi_layout.doc.example.json \
+  ./external_out_template_doc/roi_result.json \
+  ./external_out_template_doc/debug
 ```
 
 ## Notes
@@ -88,6 +106,13 @@ python external/sync_manager.py \
 - The final report now includes `replay_requests`, and the intranet side can replay only those missing pages.
 - The intranet renderer no longer depends on `tkinter`; it uses terminal clear-screen paging only.
 - The terminal renderer supports fixed top/bottom padding, paired `[PAGE-BEGIN]` / `[PAGE-END]` markers, and width warnings for more stable capture.
+- `config/projection.example.json` can now hold shared render and OBS capture settings so both sides use the same page dwell timing.
 - The external side now prioritizes `[PAGE-BEGIN]` / `[PAGE-END]` markers and only falls back to header-field parsing when needed.
+- `external/sync_manager.py` now supports direct OBS auto-capture when `--image` is omitted and `--obs-source` or `obs_capture.source` is configured.
 - The OCR runner now performs basic image preprocessing and recognizes header/body/footer regions separately to reduce terminal noise.
 - OCR entries are now re-sorted by y/x reading order to reduce line-serialization errors.
+- The default GPU-oriented OCR preset is now the reduced-VRAM DirectML `server` profile; see [`config/ocr.defaults.json`](C:\Users\Tom\Documents\Projects\CodeReader\config\ocr.defaults.json).
+- A document-oriented DirectML preset is saved in [`config/ocr.doc.defaults.json`](C:\Users\Tom\Documents\Projects\CodeReader\config\ocr.doc.defaults.json).
+- Experimental template-aligned ROI OCR scaffolding lives in [`external/template_roi_runner.py`](C:\Users\Tom\Documents\Projects\CodeReader\external\template_roi_runner.py) with example layout config in [`config/template_roi_layout.example.json`](C:\Users\Tom\Documents\Projects\CodeReader\config\template_roi_layout.example.json).
+- The experimental ROI runner now performs ORB-based template alignment, fixed ROI extraction, line segmentation inside the `line_numbers` and `code` regions, and structured line pairing for CRNN-CTC-style OCR experiments.
+- The experimental ROI runner can now use the already-installed PP-OCRv4 recognition server models directly, including the `ch_doc` variant, without requiring a separate custom CRNN model file first.

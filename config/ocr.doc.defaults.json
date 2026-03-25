@@ -1,0 +1,24 @@
+{
+  "description": "Document-oriented OCR profile validated on this workstation after enabling DirectML GPU acceleration.",
+  "sync_manager_defaults": {
+    "ocr_mode": "balanced",
+    "accel": "auto",
+    "model_preset": "doc"
+  },
+  "runner_effective_defaults": {
+    "directml_doc_upscale": 1.55,
+    "directml_doc_body_tiles": 1,
+    "directml_doc_max_side_len": 2200,
+    "directml_doc_det_limit_side_len": 960,
+    "directml_doc_rec_batch_num": 3,
+    "directml_doc_rec_img_shape": [
+      3,
+      48,
+      320
+    ]
+  },
+  "notes": [
+    "The doc preset uses the PP-OCRv4 document recognition server model on DirectML.",
+    "Use this preset when comment blocks, Chinese annotations, or document-like regions are more important than raw code token stability."
+  ]
+}

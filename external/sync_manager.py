@@ -12,18 +12,27 @@ The first version orchestrates:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import subprocess
 import sys
 from typing import Dict, List
 
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(CURRENT_DIR)
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+import obs_capture
 from page_detector import extract_body_region, has_page_markers, is_last_page, page_identity, parse_header
+from shared.projection_settings import get_obs_capture_settings, load_projection_settings
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the external OCR sync flow.")
-    parser.add_argument("--image", required=True, help="Screenshot image path.")
+    parser.add_argument("--image", default=None, help="Screenshot image path.")
+    parser.add_argument("--projection-config", default=None, help="Shared projection config JSON path.")
     parser.add_argument("--workspace", default="external_out", help="Working directory.")
     parser.add_argument("--lang", default="en", help="OCR language.")
     parser.add_argument("--ocr-mode", choices=["fast", "balanced", "quality"], default="balanced", help="OCR quality profile.")
@@ -33,7 +42,60 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--upscale", type=float, default=0.0, help="Override OCR upscale factor.")
     parser.add_argument("--max-side-len", type=int, default=0, help="Override RapidOCR max side length.")
     parser.add_argument("--det-limit-side-len", type=int, default=0, help="Override OCR detector side length.")
-    return parser.parse_args()
+    parser.add_argument("--obs-host", default="127.0.0.1", help="OBS websocket host.")
+    parser.add_argument("--obs-port", type=int, default=4455, help="OBS websocket port.")
+    parser.add_argument("--obs-password", default="", help="OBS websocket password.")
+    parser.add_argument("--obs-source", default="", help="OBS source name for automatic capture.")
+    parser.add_argument("--obs-out-dir", default="", help="Directory for captured OBS frames.")
+    parser.add_argument("--obs-image-format", default="png", choices=["png", "jpg"], help="OBS capture image format.")
+    parser.add_argument("--obs-image-width", type=int, default=1920, help="OBS capture image width.")
+    parser.add_argument("--obs-count", type=int, default=0, help="Number of OBS frames to capture. 0 means run until interrupted.")
+    parser.add_argument("--obs-interval-ms", type=int, default=1800, help="Delay between OBS captures.")
+    parser.add_argument("--obs-initial-delay-ms", type=int, default=0, help="Delay before the first OBS capture.")
+    args = parser.parse_args()
+    apply_projection_defaults(args)
+    if not args.image and not args.obs_source:
+        parser.error("either --image or --obs-source (or projection config obs_capture.source) is required")
+    return args
+
+
+SYNC_ARG_DEFAULTS = {
+    "obs_host": "127.0.0.1",
+    "obs_port": 4455,
+    "obs_password": "",
+    "obs_source": "",
+    "obs_out_dir": "",
+    "obs_image_format": "png",
+    "obs_image_width": 1920,
+    "obs_count": 0,
+    "obs_interval_ms": 1800,
+    "obs_initial_delay_ms": 0,
+}
+
+
+def apply_projection_defaults(args: argparse.Namespace) -> None:
+    config = load_projection_settings(args.projection_config)
+    settings = get_obs_capture_settings(config)
+    if args.obs_host == SYNC_ARG_DEFAULTS["obs_host"]:
+        args.obs_host = str(settings.get("host", args.obs_host))
+    if args.obs_port == SYNC_ARG_DEFAULTS["obs_port"]:
+        args.obs_port = int(settings.get("port", args.obs_port))
+    if args.obs_password == SYNC_ARG_DEFAULTS["obs_password"]:
+        args.obs_password = str(settings.get("password", args.obs_password))
+    if args.obs_source == SYNC_ARG_DEFAULTS["obs_source"]:
+        args.obs_source = str(settings.get("source", args.obs_source))
+    if args.obs_out_dir == SYNC_ARG_DEFAULTS["obs_out_dir"]:
+        args.obs_out_dir = str(settings.get("out_dir", args.obs_out_dir))
+    if args.obs_image_format == SYNC_ARG_DEFAULTS["obs_image_format"]:
+        args.obs_image_format = str(settings.get("image_format", args.obs_image_format))
+    if args.obs_image_width == SYNC_ARG_DEFAULTS["obs_image_width"]:
+        args.obs_image_width = int(settings.get("image_width", args.obs_image_width))
+    if args.obs_count == SYNC_ARG_DEFAULTS["obs_count"]:
+        args.obs_count = int(settings.get("count", args.obs_count))
+    if args.obs_interval_ms == SYNC_ARG_DEFAULTS["obs_interval_ms"]:
+        args.obs_interval_ms = int(settings.get("interval_ms", args.obs_interval_ms))
+    if args.obs_initial_delay_ms == SYNC_ARG_DEFAULTS["obs_initial_delay_ms"]:
+        args.obs_initial_delay_ms = int(settings.get("initial_delay_ms", args.obs_initial_delay_ms))
 
 
 def ensure_dir(path: str) -> None:
@@ -194,9 +256,8 @@ def build_final_report(state: Dict[str, object]) -> Dict[str, object]:
     }
 
 
-def main() -> int:
-    args = parse_args()
-    image_path = resolve_input_path(args.image)
+def process_image(args: argparse.Namespace, image_path: str) -> str:
+    image_path = resolve_input_path(image_path)
     workspace = resolve_input_path(args.workspace)
     ensure_dir(workspace)
 
@@ -248,7 +309,7 @@ def main() -> int:
         final_report_path = final_report_json
 
     report = {
-        "image": args.image,
+        "image": image_path,
         "resolved_image": image_path,
         "header": header,
         "page_identity": page_identity(header),
@@ -264,11 +325,52 @@ def main() -> int:
     }
 
     write_json(report_json, report)
+    return report_json
 
-    print(report_json)
-    if final_report_path:
-        print(final_report_path)
+
+async def run_obs_session(args: argparse.Namespace) -> int:
+    workspace = resolve_input_path(args.workspace)
+    ensure_dir(workspace)
+    capture_dir = resolve_input_path(args.obs_out_dir or os.path.join(workspace, "captures"))
+    obs_capture.ensure_dir(capture_dir)
+
+    capture_index = 0
+    async with obs_capture.ObsClient(args.obs_host, args.obs_port, args.obs_password) as client:
+        if args.obs_initial_delay_ms > 0:
+            await asyncio.sleep(max(args.obs_initial_delay_ms, 0) / 1000.0)
+        while args.obs_count <= 0 or capture_index < args.obs_count:
+            capture_index += 1
+            payload = await obs_capture.capture_once(
+                client,
+                args.obs_source,
+                args.obs_image_format,
+                args.obs_image_width,
+            )
+            image_path = obs_capture.build_capture_path(capture_dir, args.obs_image_format, capture_index)
+            with open(image_path, "wb") as handle:
+                handle.write(payload)
+            report_path = process_image(args, image_path)
+            print(image_path)
+            print(report_path)
+            final_report_path = load_json(report_path).get("final_report_json")
+            if final_report_path:
+                print(final_report_path)
+            if args.obs_count > 0 and capture_index >= args.obs_count:
+                break
+            await asyncio.sleep(max(args.obs_interval_ms, 0) / 1000.0)
     return 0
+
+
+def main() -> int:
+    args = parse_args()
+    if args.image:
+        report_json = process_image(args, args.image)
+        print(report_json)
+        final_report_path = load_json(report_json).get("final_report_json")
+        if final_report_path:
+            print(final_report_path)
+        return 0
+    return asyncio.run(run_obs_session(args))
 
 
 if __name__ == "__main__":

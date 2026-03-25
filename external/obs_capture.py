@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import sys
@@ -31,23 +32,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--out-dir", required=True, help="Image output directory.")
     parser.add_argument("--image-format", default="png", choices=["png", "jpg"], help="Image format.")
     parser.add_argument("--image-width", type=int, default=1920, help="Requested image width.")
+    parser.add_argument("--ws-max-size-mb", type=int, default=128, help="WebSocket max message size in MB.")
     parser.add_argument("--count", type=int, default=1, help="Number of screenshots to capture.")
     parser.add_argument("--interval-ms", type=int, default=1500, help="Capture interval.")
     return parser.parse_args()
 
 
 class ObsClient:
-    def __init__(self, host: str, port: int, password: str) -> None:
+    def __init__(self, host: str, port: int, password: str, max_size_bytes: int = 128 * 1024 * 1024) -> None:
         self._url = "ws://%s:%s" % (host, port)
         self._password = password
+        self._max_size_bytes = max(1024 * 1024, int(max_size_bytes))
         self._message_id = 0
         self._socket = None
 
     async def __aenter__(self) -> "ObsClient":
-        self._socket = await websockets.connect(self._url, max_size=32 * 1024 * 1024)
-        await self._recv_json()
-        await self._send_json({"op": 1, "d": {"rpcVersion": 1}})
-        await self._recv_json()
+        self._socket = await websockets.connect(self._url, max_size=self._max_size_bytes)
+        hello = await self._recv_json()
+        identify_payload: Dict[str, Any] = {"rpcVersion": 1}
+        authentication = self._build_authentication(hello)
+        if authentication:
+            identify_payload["authentication"] = authentication
+        await self._send_json({"op": 1, "d": identify_payload})
+        identified = await self._recv_json()
+        if identified.get("op") != 2:
+            raise RuntimeError("OBS websocket identify failed: %s" % identified)
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
@@ -61,6 +70,21 @@ class ObsClient:
     async def _recv_json(self) -> Dict[str, Any]:
         assert self._socket is not None
         return json.loads(await self._socket.recv())
+
+    def _build_authentication(self, hello: Dict[str, Any]) -> Optional[str]:
+        auth = hello.get("d", {}).get("authentication")
+        if not auth:
+            return None
+        if not self._password:
+            raise RuntimeError("OBS websocket requires a password, but none was provided.")
+        salt = str(auth.get("salt", ""))
+        challenge = str(auth.get("challenge", ""))
+        secret = base64.b64encode(
+            hashlib.sha256((self._password + salt).encode("utf-8")).digest()
+        ).decode("utf-8")
+        return base64.b64encode(
+            hashlib.sha256((secret + challenge).encode("utf-8")).digest()
+        ).decode("utf-8")
 
     async def call(self, request_type: str, request_data: Dict[str, Any]) -> Dict[str, Any]:
         self._message_id += 1
@@ -86,13 +110,12 @@ class ObsClient:
 
 async def capture_once(client: ObsClient, source: str, image_format: str, image_width: int) -> bytes:
     response = await client.call(
-        "SaveSourceScreenshot",
+        "GetSourceScreenshot",
         {
             "sourceName": source,
             "imageFormat": image_format,
             "imageWidth": image_width,
             "imageCompressionQuality": 100,
-            "imageFilePath": "",
         },
     )
     response_data = response.get("responseData", {})
@@ -109,13 +132,17 @@ def ensure_dir(path: str) -> None:
         os.makedirs(path)
 
 
+def build_capture_path(out_dir: str, image_format: str, capture_index: int) -> str:
+    filename = "capture_%s_%03d.%s" % (int(time.time()), capture_index, image_format)
+    return os.path.join(out_dir, filename)
+
+
 async def run_capture(args: argparse.Namespace) -> int:
     ensure_dir(args.out_dir)
-    async with ObsClient(args.host, args.port, args.password) as client:
+    async with ObsClient(args.host, args.port, args.password, args.ws_max_size_mb * 1024 * 1024) as client:
         for index in range(args.count):
             payload = await capture_once(client, args.source, args.image_format, args.image_width)
-            filename = "capture_%s_%03d.%s" % (int(time.time()), index + 1, args.image_format)
-            path = os.path.join(args.out_dir, filename)
+            path = build_capture_path(args.out_dir, args.image_format, index + 1)
             with open(path, "wb") as handle:
                 handle.write(payload)
             print(path)

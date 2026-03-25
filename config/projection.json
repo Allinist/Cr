@@ -1,13 +1,13 @@
 {
   "repo_root": ".",
-  "repo_name": "spc-cloud",
-  "branch": "feature/example",
-  "commit": "abc1234",
+  "repo_name": "CodeReader",
+  "branch": "local",
+  "commit": "local",
   "page_lines": 40,
   "page_cols": 110,
   "timing": {
-    "page_dwell_ms": 1800,
-    "initial_capture_delay_ms": 300
+    "page_dwell_ms": 2400,
+    "initial_capture_delay_ms": 500
   },
   "render": {
     "line_numbers": "none",
@@ -20,14 +20,15 @@
   "obs_capture": {
     "host": "127.0.0.1",
     "port": 4455,
-    "password": "",
-    "source": "Video Capture Device",
+    "password": "BlqWFhb0pcNztb4h",
+    "source": "u390",
     "out_dir": "external_out/captures",
-    "image_format": "png",
-    "image_width": 1920,
-    "count": 0,
-    "interval_ms": 1800,
-    "initial_delay_ms": 300
+    "image_format": "jpg",
+    "image_width": 3840,
+    "ws_max_size_mb": 128,
+    "count": 639,
+    "interval_ms": 2400,
+    "initial_delay_ms": 500
   },
   "mode": "full",
   "exclude_dirs": [

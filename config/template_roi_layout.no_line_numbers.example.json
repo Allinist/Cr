@@ -1,0 +1,57 @@
+{
+  "reference_image": "screenshots/test.png",
+  "alignment": {
+    "mode": "orb_homography",
+    "min_match_count": 12,
+    "max_features": 1500,
+    "keep_percent": 0.2
+  },
+  "rois": [
+    {
+      "name": "header",
+      "x": 0,
+      "y": 0,
+      "width": 3838,
+      "height": 310
+    },
+    {
+      "name": "code",
+      "x": 112,
+      "y": 310,
+      "width": 3726,
+      "height": 1719
+    },
+    {
+      "name": "footer",
+      "x": 0,
+      "y": 2029,
+      "width": 3838,
+      "height": 129
+    }
+  ],
+  "recognizer": {
+    "type": "rapidocr_rec",
+    "model_path": ".venv314/Lib/site-packages/rapidocr/models/ch_PP-OCRv4_rec_server_infer.onnx",
+    "charset_path": ".venv314/Lib/site-packages/rapidocr/models/ppocr_keys_v1.txt",
+    "providers": [
+      "DmlExecutionProvider",
+      "CPUExecutionProvider"
+    ],
+    "ocr_version": "PP-OCRv4",
+    "model_type": "server",
+    "lang_type": "ch",
+    "input_width": 320,
+    "input_height": 48,
+    "batch_size": 1,
+    "use_cls": false,
+    "text_score": 0.2
+  },
+  "segmentation": {
+    "min_line_height": 18,
+    "merge_gap": 6,
+    "row_threshold_fraction": 0.08,
+    "col_threshold_fraction": 0.03,
+    "line_padding_y": 2,
+    "line_padding_x": 2
+  }
+}
