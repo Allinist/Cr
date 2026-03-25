@@ -9,7 +9,7 @@ code projection flow described in
 - `intranet/build_manifest.py`: scan files and generate stable page/slice metadata
 - `intranet/project_registry.py`: resolve project roots from a multi-project config
 - `intranet/scan_project_tree.py`: scan all directories, file types, and files under a project
-- `intranet/render_pages.py`: render pages with `tkinter` or stdout fallback
+- `intranet/render_pages.py`: render pages in a pure terminal mode without `tkinter`
 - `intranet/list_files.sh`: simple file discovery helper
 - `intranet/compute_diff.sh`: thin wrapper around `git diff --name-status`
 - `intranet/run_sync.sh`: build and render in one step
@@ -53,14 +53,12 @@ python3 intranet/scan_project_tree.py \
 
 python3 intranet/render_pages.py \
   --manifest /tmp/manifest.json \
-  --renderer stdout \
   --limit 3 \
   --dwell-ms 100
 
 python3 intranet/replay_missing_pages.py \
   --manifest /tmp/manifest.json \
   --report external_out/recognition_result_report.json \
-  --renderer stdout \
   --dwell-ms 100
 
 python external/ocr_runner.py \
@@ -84,3 +82,4 @@ python external/sync_manager.py \
 - `PAGE=x/y` is parsed on the external side for missing-page detection.
 - When the external side sees the last page of a file, it writes `recognition_result_report.json` with recognized and missing pages.
 - The final report now includes `replay_requests`, and the intranet side can replay only those missing pages.
+- The intranet renderer no longer depends on `tkinter`; it uses terminal clear-screen paging only.

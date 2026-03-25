@@ -6,7 +6,6 @@ Replay only the missing pages identified by the external OCR report.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 
 import render_pages
@@ -18,10 +17,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report", required=True, help="Recognition result report JSON path.")
     parser.add_argument("--dwell-ms", type=int, default=1800, help="Delay per page.")
     parser.add_argument(
-        "--renderer",
-        choices=["auto", "tk", "stdout"],
-        default="auto",
-        help="Preferred renderer backend.",
+        "--no-clear-screen",
+        action="store_true",
+        help="Do not clear the terminal between replayed pages.",
+    )
+    parser.add_argument(
+        "--show-status",
+        action="store_true",
+        help="Show a short status line after each page render.",
     )
     return parser.parse_args()
 
@@ -34,13 +37,12 @@ def main() -> int:
         print("no missing pages to replay")
         return 0
 
-    if args.renderer == "stdout":
-        return render_pages.render_stdout(pages, args.dwell_ms)
-    if args.renderer == "tk":
-        return render_pages.render_tk(pages, args.dwell_ms)
-    if os.environ.get("DISPLAY") or os.name == "nt":
-        return render_pages.render_tk(pages, args.dwell_ms)
-    return render_pages.render_stdout(pages, args.dwell_ms)
+    return render_pages.render_terminal(
+        pages,
+        args.dwell_ms,
+        clear_screen_enabled=not args.no_clear_screen,
+        show_status=args.show_status,
+    )
 
 
 if __name__ == "__main__":

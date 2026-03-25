@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Render code pages from a manifest in fullscreen or stdout mode.
+Render code pages from a manifest in a pure terminal mode.
 
-The implementation prefers tkinter but falls back to stdout preview so the
-script stays usable on restricted environments.
+This version intentionally avoids tkinter so it works in restricted intranet
+environments with only a basic Python installation.
 """
 
 from __future__ import annotations
@@ -21,12 +21,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--manifest", required=True, help="Input manifest JSON path.")
     parser.add_argument("--dwell-ms", type=int, default=1800, help="Delay per page.")
     parser.add_argument(
-        "--renderer",
-        choices=["auto", "tk", "stdout"],
-        default="auto",
-        help="Preferred renderer backend.",
-    )
-    parser.add_argument(
         "--limit",
         type=int,
         default=0,
@@ -36,6 +30,16 @@ def parse_args() -> argparse.Namespace:
         "--missing-report",
         default=None,
         help="Recognition result report JSON. When set, only replay missing pages.",
+    )
+    parser.add_argument(
+        "--no-clear-screen",
+        action="store_true",
+        help="Do not clear the terminal between stdout pages.",
+    )
+    parser.add_argument(
+        "--show-status",
+        action="store_true",
+        help="Show a short status line after each page render.",
     )
     return parser.parse_args()
 
@@ -108,58 +112,33 @@ def format_page(page: Dict[str, object]) -> str:
     return "\n".join(header + body + footer)
 
 
-def render_stdout(pages: List[Dict[str, object]], dwell_ms: int) -> int:
+def clear_terminal() -> None:
+    if os.name == "nt":
+        os.system("cls")
+        return
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.flush()
+
+
+def render_terminal(
+    pages: List[Dict[str, object]],
+    dwell_ms: int,
+    clear_screen_enabled: bool = True,
+    show_status: bool = False,
+) -> int:
     for index, page in enumerate(pages, 1):
-        if index > 1:
+        if clear_screen_enabled:
+            clear_terminal()
+        elif index > 1:
             sys.stdout.write("\n")
         sys.stdout.write(format_page(page))
         sys.stdout.write("\n")
+        if show_status:
+            sys.stdout.write(
+                "[%s/%s] %s\n" % (index, len(pages), page.get("file", "unknown"))
+            )
         sys.stdout.flush()
         time.sleep(max(dwell_ms, 0) / 1000.0)
-    return 0
-
-
-def render_tk(pages: List[Dict[str, object]], dwell_ms: int) -> int:
-    try:
-        import tkinter as tk
-    except Exception:
-        return render_stdout(pages, dwell_ms)
-
-    root = tk.Tk()
-    root.configure(bg="#f5f5f5")
-    root.attributes("-fullscreen", True)
-    root.title("Intranet Code Projector")
-
-    text = tk.Text(
-        root,
-        bg="#f5f5f5",
-        fg="#111111",
-        font=("Courier New", 16),
-        wrap="none",
-        borderwidth=0,
-        highlightthickness=0,
-        padx=24,
-        pady=24,
-    )
-    text.pack(fill="both", expand=True)
-
-    state = {"index": 0}
-
-    def show_page() -> None:
-        index = state["index"]
-        if index >= len(pages):
-            root.destroy()
-            return
-        text.configure(state="normal")
-        text.delete("1.0", "end")
-        text.insert("1.0", format_page(pages[index]))
-        text.configure(state="disabled")
-        state["index"] += 1
-        root.after(max(dwell_ms, 1), show_page)
-
-    root.bind("<Escape>", lambda event: root.destroy())
-    root.after(1, show_page)
-    root.mainloop()
     return 0
 
 
@@ -174,14 +153,12 @@ def main() -> int:
         print("no pages to render")
         return 0
 
-    renderer = args.renderer
-    if renderer == "stdout":
-        return render_stdout(pages, args.dwell_ms)
-    if renderer == "tk":
-        return render_tk(pages, args.dwell_ms)
-    if os.environ.get("DISPLAY") or os.name == "nt":
-        return render_tk(pages, args.dwell_ms)
-    return render_stdout(pages, args.dwell_ms)
+    return render_terminal(
+        pages,
+        args.dwell_ms,
+        clear_screen_enabled=not args.no_clear_screen,
+        show_status=args.show_status,
+    )
 
 
 if __name__ == "__main__":
