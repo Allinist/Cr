@@ -1,7 +1,8 @@
 numpy
 opencv-python
 pillow
-paddleocr
+rapidocr
+onnxruntime
 pyyaml
 requests
 websockets

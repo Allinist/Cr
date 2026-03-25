@@ -26,12 +26,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image", required=True, help="Screenshot image path.")
     parser.add_argument("--workspace", default="external_out", help="Working directory.")
     parser.add_argument("--lang", default="en", help="OCR language.")
+    parser.add_argument("--ocr-mode", choices=["fast", "balanced", "quality"], default="balanced", help="OCR quality profile.")
+    parser.add_argument("--accel", choices=["auto", "cpu", "directml", "openvino"], default="auto", help="Preferred inference acceleration backend.")
+    parser.add_argument("--model-preset", choices=["default", "server", "doc"], default="server", help="OCR model preset.")
+    parser.add_argument("--body-tiles", type=int, default=0, help="Override body tile count passed to OCR.")
+    parser.add_argument("--upscale", type=float, default=0.0, help="Override OCR upscale factor.")
+    parser.add_argument("--max-side-len", type=int, default=0, help="Override RapidOCR max side length.")
+    parser.add_argument("--det-limit-side-len", type=int, default=0, help="Override OCR detector side length.")
     return parser.parse_args()
 
 
 def ensure_dir(path: str) -> None:
     if not os.path.isdir(path):
         os.makedirs(path)
+
+
+def resolve_input_path(path: str) -> str:
+    return os.path.abspath(os.path.normpath(path))
 
 
 def run_subprocess(command: list) -> None:
@@ -71,7 +82,11 @@ def concat_ocr_text(payload: Dict[str, object]) -> str:
 def analyze_ocr_text(ocr_payload: Dict[str, object]) -> Dict[str, object]:
     full_text = concat_ocr_text(ocr_payload)
     header = parse_header(full_text)
-    body_text = str(ocr_payload.get("regions", {}).get("body", {}).get("text", "")).strip() or extract_body_region(full_text)
+    body_text = (
+        str(ocr_payload.get("regions", {}).get("body_code", {}).get("text", "")).strip()
+        or str(ocr_payload.get("regions", {}).get("body", {}).get("text", "")).strip()
+        or extract_body_region(full_text)
+    )
     header_text = str(ocr_payload.get("regions", {}).get("header", {}).get("text", "")).strip()
     footer_text = str(ocr_payload.get("regions", {}).get("footer", {}).get("text", "")).strip()
     return {
@@ -181,7 +196,8 @@ def build_final_report(state: Dict[str, object]) -> Dict[str, object]:
 
 def main() -> int:
     args = parse_args()
-    workspace = os.path.abspath(args.workspace)
+    image_path = resolve_input_path(args.image)
+    workspace = resolve_input_path(args.workspace)
     ensure_dir(workspace)
 
     ocr_json = os.path.join(workspace, "ocr.json")
@@ -190,14 +206,39 @@ def main() -> int:
     state_json = os.path.join(workspace, "session_state.json")
     final_report_json = os.path.join(workspace, "recognition_result_report.json")
 
-    run_subprocess([sys.executable, os.path.join("external", "ocr_runner.py"), "--image", args.image, "--output", ocr_json, "--lang", args.lang])
+    ocr_command = [
+        sys.executable,
+        os.path.join("external", "ocr_runner.py"),
+        "--image",
+        image_path,
+        "--output",
+        ocr_json,
+        "--lang",
+        args.lang,
+        "--ocr-mode",
+        args.ocr_mode,
+        "--accel",
+        args.accel,
+        "--model-preset",
+        args.model_preset,
+    ]
+    if args.body_tiles > 0:
+        ocr_command.extend(["--body-tiles", str(args.body_tiles)])
+    if args.upscale > 0:
+        ocr_command.extend(["--upscale", str(args.upscale)])
+    if args.max_side_len > 0:
+        ocr_command.extend(["--max-side-len", str(args.max_side_len)])
+    if args.det_limit_side_len > 0:
+        ocr_command.extend(["--det-limit-side-len", str(args.det_limit_side_len)])
+
+    run_subprocess(ocr_command)
     run_subprocess([sys.executable, os.path.join("external", "code_rebuilder.py"), "--input", ocr_json, "--output", rebuilt_json])
 
     ocr_payload = load_json(ocr_json)
     analyzed = analyze_ocr_text(ocr_payload)
     header = analyzed["header"]
     state = load_state(state_json)
-    state = update_state(state, args.image, header, rebuilt_json)
+    state = update_state(state, image_path, header, rebuilt_json)
     write_json(state_json, state)
 
     final_report_path = None
@@ -208,6 +249,7 @@ def main() -> int:
 
     report = {
         "image": args.image,
+        "resolved_image": image_path,
         "header": header,
         "page_identity": page_identity(header),
         "has_page_markers": analyzed["has_page_markers"],

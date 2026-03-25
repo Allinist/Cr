@@ -32,6 +32,8 @@ Install the OCR-side dependencies inside your virtual environment with:
 pip install -r requirements-ocr.txt
 ```
 
+For Python 3.14 on Windows, prefer the pure-pip `rapidocr` + `onnxruntime` route instead of PaddleOCR.
+
 ## Example
 
 ```bash

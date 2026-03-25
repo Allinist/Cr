@@ -1,0 +1,24 @@
+{
+  "description": "Default OCR profile validated on this workstation after enabling DirectML GPU acceleration.",
+  "sync_manager_defaults": {
+    "ocr_mode": "balanced",
+    "accel": "auto",
+    "model_preset": "server"
+  },
+  "runner_effective_defaults": {
+    "directml_server_upscale": 1.55,
+    "directml_server_body_tiles": 1,
+    "directml_server_max_side_len": 2200,
+    "directml_server_det_limit_side_len": 960,
+    "directml_server_rec_batch_num": 3,
+    "directml_server_rec_img_shape": [
+      3,
+      48,
+      320
+    ]
+  },
+  "notes": [
+    "The reduced DirectML server profile avoids the earlier VRAM spike while keeping better recognition than the default mobile model.",
+    "Use model_preset=doc when the document-recognition server model is available and downloaded successfully."
+  ]
+}
