@@ -92,7 +92,7 @@ def load_state(path: str) -> Dict[str, object]:
 
 def update_state(state: Dict[str, object], image: str, header: Dict[str, object], rebuilt_path: str) -> Dict[str, object]:
     file_path = str(header.get("file", "unknown"))
-    file_name = str(header.get("name", "unknown"))
+    file_name = str(header.get("name") or os.path.basename(file_path) or "unknown")
     lines = header.get("lines") or (0, 0)
     page = header.get("page") or (0, 0)
 

@@ -32,6 +32,7 @@ def parse_header(text: str) -> Dict[str, object]:
     marker_match = PAGE_BEGIN_PATTERN.search(text)
     if marker_match:
         result["file"] = marker_match.group(1).strip()
+        result["name"] = result["file"].rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
         result["page"] = (int(marker_match.group(2)), int(marker_match.group(3)))
         result["lines"] = (int(marker_match.group(4)), int(marker_match.group(5)))
     for key, pattern in HEADER_PATTERNS.items():
@@ -44,6 +45,8 @@ def parse_header(text: str) -> Dict[str, object]:
             result[key] = tuple(int(item) for item in match.groups())
         else:
             result[key] = match.group(1).strip()
+    if "name" not in result and "file" in result:
+        result["name"] = str(result["file"]).rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     return result
 
 

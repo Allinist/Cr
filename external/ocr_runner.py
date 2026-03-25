@@ -56,6 +56,49 @@ def flatten_result(raw: Any) -> List[Dict[str, object]]:
     return entries
 
 
+def polygon_bounds(polygon: Any) -> Tuple[float, float, float, float]:
+    xs = [float(point[0]) for point in polygon]
+    ys = [float(point[1]) for point in polygon]
+    return min(xs), min(ys), max(xs), max(ys)
+
+
+def sort_entries_reading_order(entries: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    if not entries:
+        return entries
+
+    enriched = []
+    for entry in entries:
+        polygon = entry.get("polygon") or []
+        if not polygon:
+            enriched.append((0.0, 0.0, 0.0, entry))
+            continue
+        x1, y1, x2, y2 = polygon_bounds(polygon)
+        enriched.append((y1, x1, y2 - y1, entry))
+
+    average_height = sum(item[2] for item in enriched) / max(len(enriched), 1)
+    line_threshold = max(8.0, average_height * 0.7)
+    enriched.sort(key=lambda item: (item[0], item[1]))
+
+    line_groups: List[List[Tuple[float, float, float, Dict[str, object]]]] = []
+    for item in enriched:
+        if not line_groups:
+            line_groups.append([item])
+            continue
+        current_group = line_groups[-1]
+        group_y = sum(member[0] for member in current_group) / len(current_group)
+        if abs(item[0] - group_y) <= line_threshold:
+            current_group.append(item)
+        else:
+            line_groups.append([item])
+
+    sorted_entries: List[Dict[str, object]] = []
+    for group in line_groups:
+        group.sort(key=lambda item: item[1])
+        for _, _, _, entry in group:
+            sorted_entries.append(entry)
+    return sorted_entries
+
+
 def ocr_text(entries: List[Dict[str, object]]) -> str:
     return "\n".join(str(item.get("text", "")).strip() for item in entries if str(item.get("text", "")).strip())
 
@@ -100,7 +143,7 @@ def crop_regions(image: np.ndarray, header_ratio: float, footer_ratio: float) ->
 
 def run_region_ocr(ocr: PaddleOCR, image: np.ndarray) -> List[Dict[str, object]]:
     raw = ocr.ocr(image, cls=False)
-    return flatten_result(raw)
+    return sort_entries_reading_order(flatten_result(raw))
 
 
 def main() -> int:

@@ -116,7 +116,7 @@ def format_page(page: Dict[str, object]) -> str:
     header = [
         divider,
         "FILE=%s" % page["file"],
-        "NAME=%s" % page["file_name"],
+        # "NAME=%s" % page["file_name"],
         "PAGE=%s/%s" % (page["page"], page["page_total"]),
         "LINES=%s-%s" % (page["start_line"], page["end_line"]),
         divider,

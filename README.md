@@ -80,7 +80,7 @@ python external/sync_manager.py \
 - Use `config/projects.json` to register multiple projects, then switch with `--project`.
 - `scan-root` can still be overridden per run when you only want to scan one module.
 - Long lines are now wrapped inside the current page as continuation rows with blank line numbers.
-- The display header is simplified to `FILE`, `NAME`, and `LINES` so OCR can focus on file reconstruction.
+- The display header is simplified to `FILE`, `PAGE`, and `LINES`; file names are derived from `FILE` on the external side when needed.
 - `PAGE=x/y` is parsed on the external side for missing-page detection.
 - When the external side sees the last page of a file, it writes `recognition_result_report.json` with recognized and missing pages.
 - The final report now includes `replay_requests`, and the intranet side can replay only those missing pages.
@@ -88,3 +88,4 @@ python external/sync_manager.py \
 - The terminal renderer supports fixed top/bottom padding, paired `[PAGE-BEGIN]` / `[PAGE-END]` markers, and width warnings for more stable capture.
 - The external side now prioritizes `[PAGE-BEGIN]` / `[PAGE-END]` markers and only falls back to header-field parsing when needed.
 - The OCR runner now performs basic image preprocessing and recognizes header/body/footer regions separately to reduce terminal noise.
+- OCR entries are now re-sorted by y/x reading order to reduce line-serialization errors.
