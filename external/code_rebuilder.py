@@ -18,6 +18,7 @@ from typing import Dict, List, Tuple
 
 
 LINE_PATTERN = re.compile(r"^\s*(\d+)\s{2}(.*)$")
+CONTINUATION_PATTERN = re.compile(r"^\s{5}\s{2}(.*)$")
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,13 +41,18 @@ def load_entries(path: str) -> List[Dict[str, object]]:
 
 
 def parse_body_lines(entries: List[Dict[str, object]]) -> List[Tuple[int, str]]:
-    lines: List[Tuple[int, str]] = []
+    logical_lines: List[List[object]] = []
     for entry in entries:
-        text = str(entry.get("text", ""))
-        match = LINE_PATTERN.match(text)
-        if match:
-            lines.append((int(match.group(1)), match.group(2)))
-    return lines
+        raw_text = str(entry.get("text", ""))
+        for text in raw_text.splitlines():
+            match = LINE_PATTERN.match(text)
+            if match:
+                logical_lines.append([int(match.group(1)), match.group(2)])
+                continue
+            continuation = CONTINUATION_PATTERN.match(text)
+            if continuation and logical_lines:
+                logical_lines[-1][1] = str(logical_lines[-1][1]) + continuation.group(1)
+    return [(int(item[0]), str(item[1])) for item in logical_lines]
 
 
 def main() -> int:

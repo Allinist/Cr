@@ -13,16 +13,10 @@ from typing import Dict, Optional
 
 
 HEADER_PATTERNS = {
-    "repo": re.compile(r"^REPO=(.+)$", re.MULTILINE),
-    "branch": re.compile(r"^BRANCH=(.+)$", re.MULTILINE),
-    "commit": re.compile(r"^COMMIT=(.+)$", re.MULTILINE),
     "file": re.compile(r"^FILE=(.+)$", re.MULTILINE),
-    "language": re.compile(r"^LANG=(.+)$", re.MULTILINE),
+    "name": re.compile(r"^NAME=(.+)$", re.MULTILINE),
     "page": re.compile(r"^PAGE=(\d+)/(\d+)$", re.MULTILINE),
     "lines": re.compile(r"^LINES=(\d+)-(\d+)$", re.MULTILINE),
-    "slice": re.compile(r"^SLICE=(\d+)/(\d+)$", re.MULTILINE),
-    "cols": re.compile(r"^COLS=(\d+)-(\d+)$", re.MULTILINE),
-    "chunk": re.compile(r"^CHUNK=([a-fA-F0-9]+)$", re.MULTILINE),
 }
 
 
@@ -32,7 +26,7 @@ def parse_header(text: str) -> Dict[str, object]:
         match = pattern.search(text)
         if not match:
             continue
-        if key in {"page", "lines", "slice", "cols"}:
+        if key in {"page", "lines"}:
             result[key] = tuple(int(item) for item in match.groups())
         else:
             result[key] = match.group(1).strip()
@@ -41,10 +35,20 @@ def parse_header(text: str) -> Dict[str, object]:
 
 def page_identity(header: Dict[str, object]) -> Optional[str]:
     file_path = header.get("file")
-    chunk = header.get("chunk")
-    if not file_path or not chunk:
+    lines = header.get("lines")
+    page_info = header.get("page")
+    if not file_path or not lines:
         return None
-    return "%s::%s" % (file_path, chunk)
+    if page_info:
+        return "%s::page-%s" % (file_path, page_info[0])
+    return "%s::%s-%s" % (file_path, lines[0], lines[1])
+
+
+def is_last_page(header: Dict[str, object]) -> bool:
+    page_info = header.get("page")
+    if not page_info:
+        return False
+    return int(page_info[0]) == int(page_info[1])
 
 
 def is_new_page(previous_identity: Optional[str], current_header: Dict[str, object]) -> bool:

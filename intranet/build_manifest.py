@@ -182,13 +182,33 @@ def compute_line_slice_count(lines: Sequence[str], page_cols: int) -> int:
     return max(1, (max_len + page_cols - 1) // page_cols)
 
 
-def slice_lines(lines: Sequence[str], col_start: int, col_end: int) -> List[str]:
-    sliced = []
-    for line in lines:
-        start_index = max(col_start - 1, 0)
-        end_index = max(col_end, 0)
-        sliced.append(line[start_index:end_index])
-    return sliced
+def wrap_source_line(line_no: int, text: str, page_cols: int) -> List[Dict[str, object]]:
+    if page_cols <= 0:
+        raise ValueError("page-cols must be greater than 0")
+
+    if text == "":
+        return [{"source_line_no": line_no, "display_line_no": line_no, "text": ""}]
+
+    rows = []
+    segments = max(1, (len(text) + page_cols - 1) // page_cols)
+    for index in range(segments):
+        start = index * page_cols
+        end = start + page_cols
+        rows.append(
+            {
+                "source_line_no": line_no,
+                "display_line_no": line_no if index == 0 else None,
+                "text": text[start:end],
+            }
+        )
+    return rows
+
+
+def build_visual_rows(lines: Sequence[str], page_cols: int) -> List[Dict[str, object]]:
+    rows: List[Dict[str, object]] = []
+    for offset, text in enumerate(lines):
+        rows.extend(wrap_source_line(offset + 1, text, page_cols))
+    return rows
 
 
 def build_text_entry(
@@ -203,65 +223,67 @@ def build_text_entry(
     mode: str,
 ) -> Dict[str, object]:
     rel_path = normalize_path(os.path.relpath(abs_path, repo_root))
+    file_name = os.path.basename(abs_path)
     lines, encoding = read_text_file(abs_path)
     total_lines = len(lines)
     max_line_len = max([len(line) for line in lines] or [0])
-    total_pages = max(1, (max(total_lines, 1) + page_lines - 1) // page_lines)
+    visual_rows = build_visual_rows(lines, page_cols)
+    total_visual_rows = len(visual_rows)
+    total_pages = max(1, (max(total_visual_rows, 1) + page_lines - 1) // page_lines)
     file_digest = file_sha1(abs_path)
 
     pages = []
-    total_slices = 0
     for page_no in range(1, total_pages + 1):
-        start_line = (page_no - 1) * page_lines + 1
-        end_line = min(page_no * page_lines, total_lines)
-        page_body = lines[start_line - 1:end_line]
-        slice_total = compute_line_slice_count(page_body, page_cols)
-        total_slices += slice_total
-        for slice_no in range(1, slice_total + 1):
-            col_start = (slice_no - 1) * page_cols + 1
-            col_end = slice_no * page_cols
-            body_lines = slice_lines(page_body, col_start, col_end)
-            chunk_id = chunk_sha1(
-                [
-                    rel_path,
-                    str(start_line),
-                    str(end_line),
-                    str(slice_no),
-                    str(col_start),
-                    str(col_end),
-                    "\n".join(body_lines),
-                ]
-            )
-            pages.append(
-                {
-                    "repo": repo_name,
-                    "branch": branch,
-                    "commit": commit,
-                    "mode": mode,
-                    "file": rel_path,
-                    "language": language,
-                    "page": page_no,
-                    "page_total": total_pages,
-                    "slice_no": slice_no,
-                    "slice_total": slice_total,
-                    "start_line": start_line,
-                    "end_line": end_line,
-                    "col_start": col_start,
-                    "col_end": col_end,
-                    "chunk_id": chunk_id,
-                    "body": body_lines,
-                }
-            )
+        start_index = (page_no - 1) * page_lines
+        end_index = min(page_no * page_lines, total_visual_rows)
+        page_rows = visual_rows[start_index:end_index]
+        source_line_numbers = [int(row["source_line_no"]) for row in page_rows]
+        start_line = min(source_line_numbers) if source_line_numbers else 1
+        end_line = max(source_line_numbers) if source_line_numbers else start_line
+        chunk_id = chunk_sha1(
+            [
+                rel_path,
+                str(start_line),
+                str(end_line),
+                "\n".join(
+                    "%s|%s" % (
+                        "" if row["display_line_no"] is None else row["display_line_no"],
+                        row["text"],
+                    )
+                    for row in page_rows
+                ),
+            ]
+        )
+        pages.append(
+            {
+                "repo": repo_name,
+                "branch": branch,
+                "commit": commit,
+                "mode": mode,
+                "file": rel_path,
+                "file_name": file_name,
+                "language": language,
+                "page": page_no,
+                "page_total": total_pages,
+                "page_lines": page_lines,
+                "start_line": start_line,
+                "end_line": end_line,
+                "visual_row_count": len(page_rows),
+                "chunk_id": chunk_id,
+                "visual_rows": page_rows,
+            }
+        )
 
     return {
         "type": "text",
         "file": rel_path,
+        "file_name": file_name,
         "language": language,
         "encoding": encoding,
         "total_lines": total_lines,
+        "total_visual_rows": total_visual_rows,
         "max_line_len": max_line_len,
         "page_total": total_pages,
-        "slice_total": total_slices,
         "file_sha1": file_digest,
         "pages": pages,
     }

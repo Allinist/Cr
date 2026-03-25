@@ -57,6 +57,12 @@ python3 intranet/render_pages.py \
   --limit 3 \
   --dwell-ms 100
 
+python3 intranet/replay_missing_pages.py \
+  --manifest /tmp/manifest.json \
+  --report external_out/recognition_result_report.json \
+  --renderer stdout \
+  --dwell-ms 100
+
 python external/ocr_runner.py \
   --image capture.png \
   --output external_out/ocr.json
@@ -73,3 +79,8 @@ python external/sync_manager.py \
 - The external OCR flow is now scaffolded, but language-aware repair and OBS authentication are still minimal.
 - Use `config/projects.json` to register multiple projects, then switch with `--project`.
 - `scan-root` can still be overridden per run when you only want to scan one module.
+- Long lines are now wrapped inside the current page as continuation rows with blank line numbers.
+- The display header is simplified to `FILE`, `NAME`, and `LINES` so OCR can focus on file reconstruction.
+- `PAGE=x/y` is parsed on the external side for missing-page detection.
+- When the external side sees the last page of a file, it writes `recognition_result_report.json` with recognized and missing pages.
+- The final report now includes `replay_requests`, and the intranet side can replay only those missing pages.

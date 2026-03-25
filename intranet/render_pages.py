@@ -13,7 +13,7 @@ import json
 import os
 import sys
 import time
-from typing import Dict, List
+from typing import Dict, List, Set, Tuple
 
 
 def parse_args() -> argparse.Namespace:
@@ -32,6 +32,11 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Render only the first N pages for testing.",
     )
+    parser.add_argument(
+        "--missing-report",
+        default=None,
+        help="Recognition result report JSON. When set, only replay missing pages.",
+    )
     return parser.parse_args()
 
 
@@ -41,31 +46,64 @@ def load_pages(manifest_path: str) -> List[Dict[str, object]]:
     pages = []
     for file_entry in manifest.get("text_files", []):
         pages.extend(file_entry.get("pages", []))
-    pages.sort(key=lambda item: (item["file"], item["page"], item["slice_no"]))
+    pages.sort(key=lambda item: (item["file"], item["page"]))
     return pages
+
+
+def pad_visual_rows(page: Dict[str, object]) -> List[Dict[str, object]]:
+    rows = list(page.get("visual_rows", []))
+    target_count = int(page.get("visual_row_count", len(rows)))
+    page_lines = int(page.get("page_lines", 0) or 0)
+    if page_lines > target_count:
+        target_count = page_lines
+    while len(rows) < target_count:
+        rows.append({"display_line_no": None, "text": ""})
+    return rows
+
+
+def load_missing_selection(report_path: str) -> Dict[str, Set[int]]:
+    with open(report_path, "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    selected: Dict[str, Set[int]] = {}
+    for item in payload.get("replay_requests", []):
+        file_path = str(item.get("file", ""))
+        pages = set(int(page) for page in item.get("pages", []) if int(page) > 0)
+        if file_path and pages:
+            selected[file_path] = pages
+    return selected
+
+
+def filter_pages_by_missing_report(pages: List[Dict[str, object]], report_path: str) -> List[Dict[str, object]]:
+    selected = load_missing_selection(report_path)
+    if not selected:
+        return []
+    filtered = []
+    seen: Set[Tuple[str, int]] = set()
+    for page in pages:
+        file_path = str(page["file"])
+        page_no = int(page["page"])
+        key = (file_path, page_no)
+        if file_path in selected and page_no in selected[file_path] and key not in seen:
+            filtered.append(page)
+            seen.add(key)
+    return filtered
 
 
 def format_page(page: Dict[str, object]) -> str:
     divider = "=" * 72
     header = [
         divider,
-        "REPO=%s" % page["repo"],
-        "BRANCH=%s" % page["branch"],
-        "COMMIT=%s" % page["commit"],
         "FILE=%s" % page["file"],
-        "LANG=%s" % page["language"],
+        "NAME=%s" % page["file_name"],
         "PAGE=%s/%s" % (page["page"], page["page_total"]),
         "LINES=%s-%s" % (page["start_line"], page["end_line"]),
-        "SLICE=%s/%s" % (page["slice_no"], page["slice_total"]),
-        "COLS=%s-%s" % (page["col_start"], page["col_end"]),
-        "CHUNK=%s" % page["chunk_id"],
         divider,
     ]
     body = []
-    start_line = int(page["start_line"])
-    for offset, line_text in enumerate(page.get("body", [])):
-        line_no = start_line + offset
-        body.append("%5d  %s" % (line_no, line_text))
+    for row in pad_visual_rows(page):
+        display_line_no = row.get("display_line_no")
+        line_prefix = "" if display_line_no is None else str(display_line_no)
+        body.append("%5s  %s" % (line_prefix, row.get("text", "")))
     footer = [divider]
     return "\n".join(header + body + footer)
 
@@ -128,6 +166,8 @@ def render_tk(pages: List[Dict[str, object]], dwell_ms: int) -> int:
 def main() -> int:
     args = parse_args()
     pages = load_pages(args.manifest)
+    if args.missing_report:
+        pages = filter_pages_by_missing_report(pages, args.missing_report)
     if args.limit > 0:
         pages = pages[: args.limit]
     if not pages:
