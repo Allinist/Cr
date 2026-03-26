@@ -150,9 +150,13 @@ class GlmOcrRecognizer:
 
         self.processor = AutoProcessor.from_pretrained(model_path, local_files_only=local_files_only, trust_remote_code=True)
         self.device, self.device_label = resolve_device(device_name)
+        torch_dtype = "auto"
+        if self.device_label == "directml":
+            # DirectML does not support bfloat16 for this model path, so load in float32.
+            torch_dtype = torch.float32
         kwargs = {
             "pretrained_model_name_or_path": model_path,
-            "torch_dtype": "auto",
+            "torch_dtype": torch_dtype,
             "local_files_only": local_files_only,
             "trust_remote_code": True,
         }

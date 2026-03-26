@@ -8,6 +8,10 @@ import re
 from typing import Dict, List, Sequence
 
 
+FENCE_LINE_RE = re.compile(r"^\s*```[A-Za-z0-9_-]*\s*$")
+FENCE_INLINE_RE = re.compile(r"```")
+
+
 AUTHOR_RE = re.compile(r"@author", re.IGNORECASE)
 DATE_RE = re.compile(r"@date|@dat", re.IGNORECASE)
 BAD_SEMICOLON_RE = re.compile(r"[锛閿][?]?[,:; ]*")
@@ -60,6 +64,25 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def strip_markdown_artifacts(text: str) -> str:
+    value = str(text).replace("\r\n", "\n").replace("\r", "\n")
+    parts = [segment.strip() for segment in value.split("\n")]
+    kept: List[str] = []
+    for part in parts:
+        if not part:
+            continue
+        if FENCE_LINE_RE.match(part):
+            continue
+        kept.append(part)
+    value = " ".join(kept).strip()
+    value = FENCE_INLINE_RE.sub("", value).strip()
+    if value == "---":
+        return ""
+    if value.startswith("The following is a sample of text extracted from a document."):
+        return ""
+    return value
+
+
 def ensure_parent(path: str) -> None:
     parent = os.path.dirname(os.path.abspath(path))
     if parent and not os.path.isdir(parent):
@@ -110,6 +133,7 @@ def extract_lines(payload: Dict[str, object]) -> List[Dict[str, object]]:
 
 
 def normalize_common(text: str) -> str:
+    text = strip_markdown_artifacts(text)
     text = replace_cjk_punctuation(text)
     text = text.replace("_", " ")
     text = BAD_SEMICOLON_RE.sub(";", text)
@@ -263,6 +287,8 @@ def cleanup_lines(lines: Sequence[Dict[str, object]]) -> List[Dict[str, object]]
             parts = [clean_code(raw_text)]
 
         part = parts[0] if parts else ""
+        if classify_text(part) == "blank":
+            part = ""
         cleaned.append(
             {
                 "index": int(item.get("index", len(cleaned) + 1)),
