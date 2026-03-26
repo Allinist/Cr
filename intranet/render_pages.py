@@ -38,8 +38,8 @@ ARG_DEFAULTS = {
 }
 
 COLOR_SCHEMES = {
-    "black-on-white": "\033[30;47m",
-    "white-on-black": "\033[37;40m",
+    "black-on-white": "\033[38;2;0;0;0m\033[48;2;255;255;255m",
+    "white-on-black": "\033[38;2;255;255;255m\033[48;2;0;0;0m",
 }
 ANSI_RESET = "\033[0m"
 

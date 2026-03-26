@@ -4,7 +4,15 @@
     "mode": "orb_homography",
     "min_match_count": 12,
     "max_features": 1500,
-    "keep_percent": 0.2
+    "keep_percent": 0.2,
+    "min_inlier_ratio": 0.3,
+    "min_corner_area_ratio": 0.5,
+    "max_corner_area_ratio": 1.8,
+    "max_edge_ratio": 6.0
+  },
+  "line_numbers": {
+    "enabled": false,
+    "min_non_empty_ratio": 0.2
   },
   "rois": [
     {
@@ -55,9 +63,12 @@
   },
   "segmentation": {
     "expected_line_count": 40,
-    "code_start_shift_px": 3,
-    "code_line_height_scale": 0.88,
-    "code_center_squeeze_px": 6,
+    "code_top_inset": 10,
+    "code_bottom_inset": 9,
+    "code_start_shift_px": 0,
+    "code_line_height_scale": 1.0,
+    "code_line_height_shrink_px": 0,
+    "code_center_squeeze_px": 0,
     "line_numbers_start_shift_px": 3,
     "line_numbers_line_height_scale": 0.88,
     "line_numbers_center_squeeze_px": 6,

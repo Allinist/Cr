@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -103,9 +104,16 @@ def build_rois(layout: Dict[str, object]) -> List[Roi]:
 
 def align_to_reference(reference: np.ndarray, image: np.ndarray, layout: Dict[str, object]) -> np.ndarray:
     alignment = layout.get("alignment", {})
+    mode = str(alignment.get("mode", "orb_homography")).lower()
+    if mode in {"none", "off", "disabled"}:
+        return image
     max_features = int(alignment.get("max_features", 1500))
     keep_percent = float(alignment.get("keep_percent", 0.2))
     min_match_count = int(alignment.get("min_match_count", 12))
+    min_inlier_ratio = float(alignment.get("min_inlier_ratio", 0.3))
+    min_corner_area_ratio = float(alignment.get("min_corner_area_ratio", 0.5))
+    max_corner_area_ratio = float(alignment.get("max_corner_area_ratio", 1.8))
+    max_edge_ratio = float(alignment.get("max_edge_ratio", 6.0))
 
     ref_gray = cv2.cvtColor(reference, cv2.COLOR_BGR2GRAY)
     img_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -126,9 +134,44 @@ def align_to_reference(reference: np.ndarray, image: np.ndarray, layout: Dict[st
 
     src = np.float32([img_kp[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
     dst = np.float32([ref_kp[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
-    homography, _ = cv2.findHomography(src, dst, cv2.RANSAC)
+    homography, mask = cv2.findHomography(src, dst, cv2.RANSAC)
     if homography is None:
         return image
+    if mask is not None:
+        inlier_ratio = float(np.count_nonzero(mask)) / float(len(matches))
+        if inlier_ratio < min_inlier_ratio:
+            return image
+
+    source_h, source_w = image.shape[:2]
+    source_corners = np.float32(
+        [
+            [0.0, 0.0],
+            [float(source_w - 1), 0.0],
+            [float(source_w - 1), float(source_h - 1)],
+            [0.0, float(source_h - 1)],
+        ]
+    ).reshape(-1, 1, 2)
+    transformed = cv2.perspectiveTransform(source_corners, homography).reshape(-1, 2)
+    if not np.isfinite(transformed).all():
+        return image
+
+    transformed_area = abs(cv2.contourArea(transformed.astype(np.float32)))
+    reference_area = float(reference.shape[0] * reference.shape[1])
+    if reference_area <= 0:
+        return image
+    area_ratio = transformed_area / reference_area
+    if area_ratio < min_corner_area_ratio or area_ratio > max_corner_area_ratio:
+        return image
+
+    edge_lengths = []
+    for index in range(4):
+        next_index = (index + 1) % 4
+        edge_lengths.append(float(np.linalg.norm(transformed[next_index] - transformed[index])))
+    min_edge = min(edge_lengths)
+    max_edge = max(edge_lengths)
+    if min_edge <= 1.0 or (max_edge / min_edge) > max_edge_ratio:
+        return image
+
     return cv2.warpPerspective(image, homography, (reference.shape[1], reference.shape[0]))
 
 
@@ -284,9 +327,12 @@ def build_fixed_grid_line_boxes(
     usable_height = usable_bottom - usable_top
     line_height = float(usable_height) / float(expected_line_count)
     line_height_scale = float(segmentation_cfg.get("%s_line_height_scale" % roi_name, segmentation_cfg.get("line_height_scale", 1.0)))
+    line_height_shrink_px = float(
+        segmentation_cfg.get("%s_line_height_shrink_px" % roi_name, segmentation_cfg.get("line_height_shrink_px", 0.0))
+    )
     center_squeeze_px = float(segmentation_cfg.get("%s_center_squeeze_px" % roi_name, segmentation_cfg.get("center_squeeze_px", 0.0)))
     start_shift_px = float(segmentation_cfg.get("%s_start_shift_px" % roi_name, segmentation_cfg.get("start_shift_px", 0.0)))
-    scaled_height = max(1.0, line_height * max(0.5, min(1.5, line_height_scale)))
+    scaled_height = max(1.0, line_height * max(0.5, min(1.5, line_height_scale)) - max(0.0, line_height_shrink_px))
     center_index = (expected_line_count - 1) / 2.0
 
     line_boxes: List[LineBox] = []
@@ -567,6 +613,51 @@ def normalize_line_number(text: str) -> Optional[int]:
         return None
 
 
+HEADER_LINES_PATTERN = re.compile(r"LINES\s*[:=-]\s*(\d+)\s*-\s*(\d+)", re.IGNORECASE)
+HEADER_OCR_ENGINE: Optional[RapidOCR] = None
+
+
+def parse_header_line_range(header_text: str) -> Optional[Tuple[int, int]]:
+    match = HEADER_LINES_PATTERN.search(header_text or "")
+    if not match:
+        return None
+    start_line = int(match.group(1))
+    end_line = int(match.group(2))
+    if start_line <= 0 or end_line < start_line:
+        return None
+    return start_line, end_line
+
+
+def ocr_header_text_with_detector(header_crop: np.ndarray) -> str:
+    global HEADER_OCR_ENGINE
+    if header_crop.size == 0:
+        return ""
+    if HEADER_OCR_ENGINE is None:
+        HEADER_OCR_ENGINE = RapidOCR()
+    output = HEADER_OCR_ENGINE(header_crop)
+    txts = getattr(output, "txts", None)
+    if not txts:
+        return ""
+    return "\n".join(str(item).strip() for item in txts if str(item).strip())
+
+
+def apply_header_line_range(
+    structured_lines: Sequence[Dict[str, object]],
+    header_text: str,
+) -> List[Dict[str, object]]:
+    line_range = parse_header_line_range(header_text)
+    if not line_range:
+        return list(structured_lines)
+    start_line, end_line = line_range
+    updated: List[Dict[str, object]] = []
+    for index, item in enumerate(structured_lines):
+        current = dict(item)
+        target_line_no = start_line + index
+        current["line_no"] = target_line_no if target_line_no <= end_line else None
+        updated.append(current)
+    return updated
+
+
 def repair_line_number_sequence(lines: Sequence[Dict[str, object]]) -> List[Dict[str, object]]:
     repaired: List[Dict[str, object]] = []
     previous_line_no: Optional[int] = None
@@ -588,15 +679,20 @@ def repair_line_number_sequence(lines: Sequence[Dict[str, object]]) -> List[Dict
     return repaired
 
 
-def pair_line_numbers(number_lines: Sequence[Dict[str, object]], code_lines: Sequence[Dict[str, object]]) -> List[Dict[str, object]]:
+def pair_line_numbers(
+    number_lines: Sequence[Dict[str, object]],
+    code_lines: Sequence[Dict[str, object]],
+    missing_line_number_policy: str = "index",
+) -> List[Dict[str, object]]:
     if not code_lines:
         return []
 
     if not number_lines:
+        use_index = missing_line_number_policy == "index"
         return [
             {
                 "index": index,
-                "line_no": index,
+                "line_no": index if use_index else None,
                 "text": code_line["text"],
                 "code_box": code_line["box"],
                 "line_number_box": None,
@@ -741,10 +837,17 @@ def run_template_roi_with_context(
     rois = list(context["rois"])
 
     aligned = align_to_reference(reference, image, layout) if align_image else image
+    line_number_cfg = layout.get("line_numbers", {})
+    if not isinstance(line_number_cfg, dict):
+        line_number_cfg = {}
+    line_numbers_enabled = bool(line_number_cfg.get("enabled", any(roi.name == "line_numbers" for roi in rois)))
+    min_line_number_non_empty_ratio = float(line_number_cfg.get("min_non_empty_ratio", 0.2))
 
     roi_results = []
     roi_crops: Dict[str, np.ndarray] = {}
     for roi in rois:
+        if roi.name == "line_numbers" and not line_numbers_enabled:
+            continue
         crop = crop_roi(aligned, roi)
         roi_crops[roi.name] = crop
         if debug_dir:
@@ -763,8 +866,18 @@ def run_template_roi_with_context(
     roi_map = {roi.name: roi for roi in rois}
     line_numbers_roi = next((item for item in roi_results if item["name"] == "line_numbers"), {"lines": []})
     code_roi = next((item for item in roi_results if item["name"] == "code"), {"lines": []})
+    line_number_lines = list(line_numbers_roi.get("lines", []))
+    line_number_non_empty = sum(1 for line in line_number_lines if str(line.get("text", "")).strip())
+    line_number_ratio = (
+        float(line_number_non_empty) / float(len(line_number_lines))
+        if line_number_lines
+        else 0.0
+    )
+    effective_line_numbers = line_numbers_enabled and line_number_ratio >= min_line_number_non_empty_ratio
+
     if (
-        line_numbers_roi.get("lines")
+        effective_line_numbers
+        and line_numbers_roi.get("lines")
         and roi_map.get("code") is not None
         and not uses_fixed_grid(segmentation_cfg, "code")
     ):
@@ -781,9 +894,16 @@ def run_template_roi_with_context(
             if score_lines(anchored_lines) >= score_lines(projected_lines):
                 code_roi["lines"] = anchored_lines
     structured_lines = pair_line_numbers(
-        list(line_numbers_roi.get("lines", [])),
+        line_number_lines if effective_line_numbers else [],
         list(code_roi.get("lines", [])),
+        missing_line_number_policy="none" if not effective_line_numbers else "index",
     )
+    if not effective_line_numbers:
+        header_roi = next((item for item in roi_results if item["name"] == "header"), {"text": ""})
+        header_line_source_text = str(header_roi.get("text", ""))
+        if not parse_header_line_range(header_line_source_text) and "header" in roi_crops:
+            header_line_source_text = ocr_header_text_with_detector(roi_crops["header"])
+        structured_lines = apply_header_line_range(structured_lines, header_line_source_text)
 
     return {
         "image": image_label,
@@ -792,7 +912,10 @@ def run_template_roi_with_context(
         "recognizer_available": recognizer_available,
         "missing_model_paths": missing_paths,
         "providers": providers,
-        "line_numbers_enabled": any(roi.name == "line_numbers" for roi in rois),
+        "line_numbers_enabled": line_numbers_enabled,
+        "line_numbers_effective": effective_line_numbers,
+        "line_numbers_non_empty_count": line_number_non_empty,
+        "line_numbers_total_count": len(line_number_lines),
         "rois": roi_results,
         "structured_lines": structured_lines,
     }
