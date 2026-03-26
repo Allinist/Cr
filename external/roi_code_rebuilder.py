@@ -11,6 +11,45 @@ from typing import Dict, List, Sequence
 AUTHOR_RE = re.compile(r"@author", re.IGNORECASE)
 DATE_RE = re.compile(r"@date|@dat", re.IGNORECASE)
 BAD_SEMICOLON_RE = re.compile(r"[锛閿][?]?[,:; ]*")
+CJK_PUNCT_TRANSLATION = str.maketrans(
+    {
+        "，": ",",
+        "。": ".",
+        "；": ";",
+        "：": ":",
+        "（": "(",
+        "）": ")",
+        "【": "[",
+        "】": "]",
+        "［": "[",
+        "］": "]",
+        "｛": "{",
+        "｝": "}",
+        "＜": "<",
+        "＞": ">",
+        "《": "<",
+        "》": ">",
+        "“": "\"",
+        "”": "\"",
+        "‘": "'",
+        "’": "'",
+        "、": ",",
+        "！": "!",
+        "？": "?",
+        "＝": "=",
+        "＋": "+",
+        "－": "-",
+        "／": "/",
+        "＊": "*",
+        "％": "%",
+        "｜": "|",
+        "＆": "&",
+        "＠": "@",
+        "＃": "#",
+        "＾": "^",
+        "～": "~",
+    }
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,6 +110,7 @@ def extract_lines(payload: Dict[str, object]) -> List[Dict[str, object]]:
 
 
 def normalize_common(text: str) -> str:
+    text = replace_cjk_punctuation(text)
     text = text.replace("_", " ")
     text = BAD_SEMICOLON_RE.sub(";", text)
     text = re.sub(r"\s+", " ", text).strip()
@@ -106,6 +146,10 @@ def normalize_common(text: str) -> str:
     text = re.sub(r"public class ([A-Za-z0-9_]+)extends", r"public class \1 extends", text)
     text = re.sub(r";(?=import\s)", ";\n", text)
     return text.strip()
+
+
+def replace_cjk_punctuation(text: str) -> str:
+    return str(text).translate(CJK_PUNCT_TRANSLATION)
 
 
 def classify_text(text: str) -> str:
@@ -249,6 +293,17 @@ def build_java_source(cleaned_lines: Sequence[Dict[str, object]]) -> str:
         ),
     )
     return "\n".join(str(item.get("cleaned_text", "")) for item in ordered)
+
+
+def build_raw_ocr_source(raw_lines: Sequence[Dict[str, object]]) -> str:
+    ordered = sorted(
+        raw_lines,
+        key=lambda item: (
+            int(item.get("absolute_line_no")) if item.get("absolute_line_no") is not None else int(item.get("line_no") or 0),
+            int(item.get("index", 0)),
+        ),
+    )
+    return "\n".join(replace_cjk_punctuation(str(item.get("raw_text", ""))) for item in ordered)
 
 
 def main() -> int:

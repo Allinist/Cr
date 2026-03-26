@@ -82,6 +82,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--obs-initial-delay-ms", type=int, default=0, help="Delay before first capture.")
     parser.add_argument("--header-ocr-preset", choices=["server", "doc"], default="server", help="Header OCR preset.")
     parser.add_argument("--ocr-accel", choices=["cpu", "auto"], default="cpu", help="OCR execution provider mode for batch processing.")
+    parser.add_argument("--skip-alignment", action="store_true", help="Skip ORB homography alignment and crop ROIs directly from captured images.")
     parser.add_argument("--session-name", default="obs_roi_session", help="Summary JSON base name.")
     args = parser.parse_args()
     apply_projection_defaults(args)
@@ -336,13 +337,14 @@ async def run_session(args: argparse.Namespace) -> int:
             if index == 1 or index % 10 == 0 or index == total_images:
                 print("processing %s/%s %s" % (index, total_images, os.path.basename(image_path)))
             image = load_image(image_path)
-            aligned_for_header = align_to_reference(reference_image, image, layout)
+            aligned_for_header = image if args.skip_alignment else align_to_reference(reference_image, image, layout)
             image_label = os.path.basename(image_path)
             roi_payload = run_template_roi_with_context(
                 roi_context,
                 image,
                 image_label,
                 debug_dir=None,
+                align_image=not args.skip_alignment,
             )
             header_text = extract_header_text(header_engine, aligned_for_header, args.layout)
             header = parse_header(header_text)

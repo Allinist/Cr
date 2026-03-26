@@ -729,6 +729,7 @@ def run_template_roi_with_context(
     image: np.ndarray,
     image_label: str,
     debug_dir: Optional[str] = None,
+    align_image: bool = True,
 ) -> Dict[str, object]:
     layout = dict(context["layout"])
     reference = context["reference"]
@@ -739,7 +740,7 @@ def run_template_roi_with_context(
     segmentation_cfg = dict(context["segmentation_cfg"])
     rois = list(context["rois"])
 
-    aligned = align_to_reference(reference, image, layout)
+    aligned = align_to_reference(reference, image, layout) if align_image else image
 
     roi_results = []
     roi_crops: Dict[str, np.ndarray] = {}

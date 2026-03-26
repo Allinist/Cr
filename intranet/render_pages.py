@@ -9,6 +9,7 @@ environments with only a basic Python installation.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import os
 import shutil
@@ -32,7 +33,15 @@ ARG_DEFAULTS = {
     "bottom_padding": 1,
     "check_width": False,
     "line_numbers": "none",
+    "color_scheme": "black-on-white",
+    "start_page": 1,
 }
+
+COLOR_SCHEMES = {
+    "black-on-white": "\033[30;47m",
+    "white-on-black": "\033[37;40m",
+}
+ANSI_RESET = "\033[0m"
 
 
 def parse_args() -> argparse.Namespace:
@@ -91,6 +100,18 @@ def parse_args() -> argparse.Namespace:
             "non-empty=hide on blank rows, none=hide on all rows."
         ),
     )
+    parser.add_argument(
+        "--color-scheme",
+        choices=tuple(COLOR_SCHEMES.keys()),
+        default="black-on-white",
+        help="Page color scheme: black-on-white or white-on-black.",
+    )
+    parser.add_argument(
+        "--start-page",
+        type=int,
+        default=1,
+        help="Start playback from the Nth page in manifest order (1-based).",
+    )
     args = parser.parse_args()
     apply_projection_defaults(args)
     return args
@@ -113,6 +134,10 @@ def apply_projection_defaults(args: argparse.Namespace) -> None:
         args.check_width = bool(settings.get("check_width", args.check_width))
     if args.line_numbers == ARG_DEFAULTS["line_numbers"]:
         args.line_numbers = str(settings.get("line_numbers", args.line_numbers))
+    if args.color_scheme == ARG_DEFAULTS["color_scheme"]:
+        args.color_scheme = str(settings.get("color_scheme", args.color_scheme))
+    if args.start_page == ARG_DEFAULTS["start_page"]:
+        args.start_page = max(1, int(settings.get("start_page", args.start_page) or 1))
 
 
 def load_pages(manifest_path: str) -> List[Dict[str, object]]:
@@ -197,23 +222,44 @@ def terminal_width() -> int:
         return 80
 
 
+def terminal_height() -> int:
+    try:
+        return shutil.get_terminal_size((80, 24)).lines
+    except Exception:
+        return 24
+
+
 def page_display_width(page: Dict[str, object], line_numbers: str = "none") -> int:
     formatted = format_page(page, line_numbers=line_numbers)
     return max(len(line) for line in formatted.splitlines())
 
 
-def clear_terminal() -> None:
-    if os.name == "nt":
-        os.system("cls")
-        return
-    sys.stdout.write("\033[2J\033[H")
+def clear_terminal(color_scheme: str = "black-on-white") -> None:
+    color_prefix = COLOR_SCHEMES.get(color_scheme, COLOR_SCHEMES["black-on-white"])
+    sys.stdout.write(f"{color_prefix}\033[2J\033[H")
     sys.stdout.flush()
+
+
+def enable_ansi_colors() -> None:
+    if os.name != "nt":
+        return
+    try:
+        kernel32 = ctypes.windll.kernel32
+        stdout_handle = kernel32.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(stdout_handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(stdout_handle, mode.value | 0x0004)
+    except Exception:
+        return
 
 
 def render_terminal(
     pages: List[Dict[str, object]],
     dwell_ms: int,
     line_numbers: str = "none",
+    color_scheme: str = "black-on-white",
+    manifest_total_pages: int | None = None,
+    start_page: int = 1,
     clear_screen_enabled: bool = True,
     show_status: bool = False,
     top_padding: int = 1,
@@ -221,9 +267,13 @@ def render_terminal(
     check_width: bool = False,
 ) -> int:
     warned_width = False
+    color_prefix = COLOR_SCHEMES.get(color_scheme, COLOR_SCHEMES["black-on-white"])
+    total_manifest_pages = manifest_total_pages if manifest_total_pages is not None else len(pages)
     for index, page in enumerate(pages, 1):
+        manifest_page_index = start_page + index - 1
+        rendered_page = format_page(page, line_numbers=line_numbers)
         if clear_screen_enabled:
-            clear_terminal()
+            clear_terminal(color_scheme=color_scheme)
         elif index > 1:
             sys.stdout.write("\n")
         if check_width and not warned_width:
@@ -237,7 +287,8 @@ def render_terminal(
                 warned_width = True
         if top_padding > 0:
             sys.stdout.write("\n" * top_padding)
-        sys.stdout.write(
+        sys.stdout.write(color_prefix)
+        page_begin_line = (
             "[PAGE-BEGIN] file=%s page=%s/%s lines=%s-%s\n"
             % (
                 page.get("file", "unknown"),
@@ -247,24 +298,40 @@ def render_terminal(
                 page.get("end_line", "?"),
             )
         )
-        sys.stdout.write(format_page(page, line_numbers=line_numbers))
-        sys.stdout.write("\n")
-        sys.stdout.write(
-            "[PAGE-END] file=%s page=%s/%s lines=%s-%s\n"
+        page_end_line = (
+            "[PAGE-END] file=%s page=%s/%s lines=%s-%s manifest_page=%s/%s\n"
             % (
                 page.get("file", "unknown"),
                 page.get("page", "?"),
                 page.get("page_total", "?"),
                 page.get("start_line", "?"),
                 page.get("end_line", "?"),
+                manifest_page_index,
+                total_manifest_pages,
             )
         )
+        sys.stdout.write(page_begin_line)
+        sys.stdout.write(rendered_page)
+        sys.stdout.write("\n")
+        sys.stdout.write(page_end_line)
         if bottom_padding > 0:
             sys.stdout.write("\n" * bottom_padding)
         if show_status:
             sys.stdout.write(
                 "[%s/%s] %s\n" % (index, len(pages), page.get("file", "unknown"))
             )
+        line_count = top_padding
+        line_count += page_begin_line.count("\n")
+        line_count += len(rendered_page.splitlines())
+        line_count += 1
+        line_count += page_end_line.count("\n")
+        line_count += bottom_padding
+        if show_status:
+            line_count += 1
+        remaining_lines = max(terminal_height() - line_count, 0)
+        if remaining_lines > 0:
+            sys.stdout.write("\n" * remaining_lines)
+        sys.stdout.write(ANSI_RESET)
         sys.stdout.flush()
         time.sleep(max(dwell_ms, 0) / 1000.0)
     return 0
@@ -272,9 +339,14 @@ def render_terminal(
 
 def main() -> int:
     args = parse_args()
+    args.start_page = max(1, int(args.start_page))
+    enable_ansi_colors()
     pages = load_pages(args.manifest)
     if args.missing_report:
         pages = filter_pages_by_missing_report(pages, args.missing_report)
+    manifest_total_pages = len(pages)
+    if args.start_page > 1:
+        pages = pages[args.start_page - 1 :]
     if args.limit > 0:
         pages = pages[: args.limit]
     if not pages:
@@ -285,6 +357,9 @@ def main() -> int:
         pages,
         args.dwell_ms,
         line_numbers=args.line_numbers,
+        color_scheme=args.color_scheme,
+        manifest_total_pages=manifest_total_pages,
+        start_page=args.start_page,
         clear_screen_enabled=not args.no_clear_screen,
         show_status=args.show_status,
         top_padding=args.top_padding,

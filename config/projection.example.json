@@ -11,6 +11,8 @@
   },
   "render": {
     "line_numbers": "none",
+    "color_scheme": "black-on-white",
+    "start_page": 1,
     "clear_screen_enabled": true,
     "show_status": false,
     "top_padding": 1,

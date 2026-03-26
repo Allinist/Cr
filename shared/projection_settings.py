@@ -9,6 +9,8 @@ DEFAULT_PAGE_DWELL_MS = 1800
 DEFAULT_RENDER_SETTINGS: Dict[str, Any] = {
     "dwell_ms": DEFAULT_PAGE_DWELL_MS,
     "line_numbers": "none",
+    "color_scheme": "black-on-white",
+    "start_page": 1,
     "clear_screen_enabled": True,
     "show_status": False,
     "top_padding": 1,

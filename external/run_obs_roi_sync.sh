@@ -11,6 +11,7 @@ CAPTURE_DIR_ARG="${4:-}"
 OBS_SOURCE_ARG="${5:-}"
 PROJECTION_CONFIG="${PROJECTION_CONFIG:-${REPO_ROOT}/config/projection.json}"
 SKIP_CAPTURE="${SKIP_CAPTURE:-0}"
+SKIP_ALIGNMENT="${SKIP_ALIGNMENT:-1}"
 
 EXTRA_ARGS=()
 if [ -f "${PROJECTION_CONFIG}" ]; then
@@ -18,6 +19,9 @@ if [ -f "${PROJECTION_CONFIG}" ]; then
 fi
 if [ "${SKIP_CAPTURE}" = "1" ]; then
   EXTRA_ARGS+=(--skip-capture)
+fi
+if [ "${SKIP_ALIGNMENT}" = "1" ]; then
+  EXTRA_ARGS+=(--skip-alignment)
 fi
 if [ -n "${CAPTURE_DIR_ARG}" ]; then
   EXTRA_ARGS+=(--capture-dir "${CAPTURE_DIR_ARG}")
