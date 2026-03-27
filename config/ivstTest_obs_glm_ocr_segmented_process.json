@@ -1,0 +1,16 @@
+{
+  "layout": "./config/ivstTest_template_roi_layout.glm_ocr.json",
+  "ocr_output_dir": "./ivstTest/ocr",
+  "code_output_dir": "./ivstTest/code",
+  "capture_dir": "./ivstTest/captures",
+  "skip_capture": true,
+  "emit_partial": true,
+  "session_name": "ivstTest_obs_glm_roi_segmented",
+  "glm_model_path": "./external_models/GLM-OCR",
+  "glm_device": "directml",
+  "glm_target": "all",
+  "glm_line_mode": "segmented",
+  "glm_max_new_tokens": 512,
+  "glm_full_max_edge": 0,
+  "glm_local_files_only": true
+}

@@ -108,6 +108,17 @@ class ObsClient:
                 return data
 
 
+async def list_input_names(client: ObsClient) -> list[str]:
+    response = await client.call("GetInputList", {})
+    items = response.get("responseData", {}).get("inputs", [])
+    names = []
+    for item in items:
+        name = str(item.get("inputName", "")).strip()
+        if name:
+            names.append(name)
+    return names
+
+
 async def capture_once(client: ObsClient, source: str, image_format: str, image_width: int) -> bytes:
     response = await client.call(
         "GetSourceScreenshot",
@@ -121,7 +132,21 @@ async def capture_once(client: ObsClient, source: str, image_format: str, image_
     response_data = response.get("responseData", {})
     image_data = response_data.get("imageData")
     if not image_data:
-        raise RuntimeError("OBS did not return screenshot data. Check source name and websocket support.")
+        status = response.get("requestStatus", {})
+        code = status.get("code")
+        comment = status.get("comment")
+        try:
+            known_inputs = await list_input_names(client)
+        except Exception:
+            known_inputs = []
+        hint = ""
+        if known_inputs:
+            hint = " Known OBS inputs: %s" % ", ".join(known_inputs[:20])
+        raise RuntimeError(
+            "OBS did not return screenshot data for source=%r format=%r width=%r. "
+            "requestStatus(code=%r, comment=%r).%s"
+            % (source, image_format, image_width, code, comment, hint)
+        )
     if "," in image_data:
         image_data = image_data.split(",", 1)[1]
     return base64.b64decode(image_data)
@@ -140,14 +165,18 @@ def build_capture_path(out_dir: str, image_format: str, capture_index: int) -> s
 async def run_capture(args: argparse.Namespace) -> int:
     ensure_dir(args.out_dir)
     async with ObsClient(args.host, args.port, args.password, args.ws_max_size_mb * 1024 * 1024) as client:
+        interval_seconds = max(args.interval_ms, 0) / 1000.0
+        next_capture_at = time.perf_counter()
         for index in range(args.count):
+            now = time.perf_counter()
+            if now < next_capture_at:
+                await asyncio.sleep(next_capture_at - now)
             payload = await capture_once(client, args.source, args.image_format, args.image_width)
             path = build_capture_path(args.out_dir, args.image_format, index + 1)
             with open(path, "wb") as handle:
                 handle.write(payload)
             print(path)
-            if index + 1 < args.count:
-                await asyncio.sleep(max(args.interval_ms, 0) / 1000.0)
+            next_capture_at += interval_seconds
     return 0
 
 

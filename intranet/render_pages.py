@@ -32,7 +32,7 @@ ARG_DEFAULTS = {
     "top_padding": 1,
     "bottom_padding": 1,
     "check_width": False,
-    "line_numbers": "none",
+    "line_numbers": "all",
     "color_scheme": "black-on-white",
     "start_page": 1,
 }
@@ -94,7 +94,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--line-numbers",
         choices=("all", "non-empty", "none"),
-        default="none",
+        default="all",
         help=(
             "Line number display mode: all=show on every row, "
             "non-empty=hide on blank rows, none=hide on all rows."
@@ -191,6 +191,7 @@ def filter_pages_by_missing_report(pages: List[Dict[str, object]], report_path: 
 
 def format_page(page: Dict[str, object], line_numbers: str = "none") -> str:
     divider = "=" * 72
+    line_no_width = 5
     header = [
         divider,
         "FILE=%s" % page["file"],
@@ -201,18 +202,30 @@ def format_page(page: Dict[str, object], line_numbers: str = "none") -> str:
     ]
     body = []
     for row in pad_visual_rows(page):
-        display_line_no = row.get("display_line_no")
+        display_line_no = format_row_line_number(row)
         text = str(row.get("text", ""))
         if line_numbers == "all":
-            line_prefix = "" if display_line_no is None else str(display_line_no)
-            body.append("%5s  %s" % (line_prefix, text))
+            line_prefix = "" if display_line_no is None else display_line_no
+            body.append(f"{line_prefix:>{line_no_width}}  {text}")
         elif line_numbers == "non-empty":
-            line_prefix = "" if (display_line_no is None or not text) else str(display_line_no)
-            body.append("%5s  %s" % (line_prefix, text))
+            line_prefix = "" if (display_line_no is None or not text) else display_line_no
+            body.append(f"{line_prefix:>{line_no_width}}  {text}")
         else:
-            body.append("%5s  %s" % ("", text))
+            body.append(f"{'':>{line_no_width}}  {text}")
     footer = [divider]
     return "\n".join(header + body + footer)
+
+
+def format_row_line_number(row: Dict[str, object]) -> str | None:
+    display_line_no = row.get("display_line_no")
+    if display_line_no is not None:
+        return str(display_line_no)
+
+    source_line_no = row.get("source_line_no")
+    if source_line_no is not None and str(row.get("text", "")) != "":
+        return f"{source_line_no}+"
+
+    return None
 
 
 def terminal_width() -> int:

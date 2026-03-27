@@ -114,6 +114,8 @@ def extract_lines(payload: Dict[str, object]) -> List[Dict[str, object]]:
             {
                 "index": int(item.get("index", index + 1)),
                 "line_no": item.get("line_no"),
+                "line_no_text": item.get("line_no_text"),
+                "continued": bool(item.get("continued", False)),
                 "raw_text": str(item.get("text", "")),
             }
             for index, item in enumerate(structured_lines)
@@ -121,14 +123,26 @@ def extract_lines(payload: Dict[str, object]) -> List[Dict[str, object]]:
 
     for roi in payload.get("rois", []):
         if roi.get("name") == "code":
-            return [
-                {
-                    "index": int(item.get("index", index + 1)),
-                    "line_no": item.get("index"),
-                    "raw_text": str(item.get("text", "")),
-                }
-                for index, item in enumerate(roi.get("lines", []))
-            ]
+            if roi.get("lines"):
+                return [
+                    {
+                        "index": int(item.get("index", index + 1)),
+                        "line_no": item.get("index"),
+                        "raw_text": str(item.get("text", "")),
+                    }
+                    for index, item in enumerate(roi.get("lines", []))
+                ]
+            if roi.get("text"):
+                raw_text = str(roi.get("text", "")).replace("\r\n", "\n").replace("\r", "\n")
+                lines = raw_text.split("\n")
+                return [
+                    {
+                        "index": index + 1,
+                        "line_no": index + 1,
+                        "raw_text": line,
+                    }
+                    for index, line in enumerate(lines)
+                ]
     return []
 
 
@@ -293,6 +307,8 @@ def cleanup_lines(lines: Sequence[Dict[str, object]]) -> List[Dict[str, object]]
             {
                 "index": int(item.get("index", len(cleaned) + 1)),
                 "line_no": item.get("line_no"),
+                "line_no_text": item.get("line_no_text"),
+                "continued": bool(item.get("continued", False)),
                 "raw_text": raw_text,
                 "cleaned_text": part,
                 "kind": classify_text(part),

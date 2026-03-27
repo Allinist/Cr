@@ -1,0 +1,65 @@
+{
+  "reference_image": "screenshots/test.png",
+  "alignment": {
+    "mode": "none"
+  },
+  "line_numbers": {
+    "enabled": true,
+    "min_non_empty_ratio": 0.2
+  },
+  "rois": [
+    {
+      "name": "header",
+      "x": 0,
+      "y": 0,
+      "width": 3838,
+      "height": 310
+    },
+    {
+      "name": "line_numbers",
+      "x": 0,
+      "y": 310,
+      "width": 96,
+      "height": 1719
+    },
+    {
+      "name": "code",
+      "x": 96,
+      "y": 310,
+      "width": 3742,
+      "height": 1719
+    },
+    {
+      "name": "footer",
+      "x": 0,
+      "y": 2029,
+      "width": 3838,
+      "height": 129
+    }
+  ],
+  "recognizer": {
+    "type": "glm_ocr_local",
+    "model_path": "zai-org/GLM-OCR",
+    "local_files_only": true,
+    "device": "auto"
+  },
+  "segmentation": {
+    "expected_line_count": 40,
+    "code_top_inset": 10,
+    "code_bottom_inset": 9,
+    "code_start_shift_px": 0,
+    "code_line_height_scale": 1.0,
+    "code_line_height_shrink_px": 0,
+    "code_center_squeeze_px": 0,
+    "line_numbers_start_shift_px": 0,
+    "line_numbers_line_height_scale": 1.0,
+    "line_numbers_line_height_shrink_px": 0,
+    "line_numbers_center_squeeze_px": 0,
+    "code_left_inset": 0,
+    "code_right_inset": 0,
+    "line_numbers_left_inset": 0,
+    "line_numbers_right_inset": 0,
+    "line_padding_y": 2,
+    "line_padding_x": 2
+  }
+}

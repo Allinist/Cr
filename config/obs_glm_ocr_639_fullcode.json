@@ -1,0 +1,16 @@
+{
+  "layout": "./config/template_roi_layout.glm_ocr.example.json",
+  "ocr_output_dir": "./external_out_glm_obs/ocr_639_fullcode",
+  "code_output_dir": "./external_out_glm_obs/code_639_fullcode",
+  "capture_dir": "./external_obs_captures",
+  "skip_capture": true,
+  "emit_partial": true,
+  "session_name": "obs_glm_roi_639_fullcode",
+  "glm_model_path": "./external_models/GLM-OCR",
+  "glm_device": "directml",
+  "glm_target": "all",
+  "glm_line_mode": "full",
+  "glm_max_new_tokens": 768,
+  "glm_full_max_edge": 1024,
+  "glm_local_files_only": true
+}
