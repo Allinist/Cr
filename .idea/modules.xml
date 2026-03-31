@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectModuleManager">
+    <modules>
+      <module fileurl="file://$PROJECT_DIR$/CodeReader.iml" filepath="$PROJECT_DIR$/CodeReader.iml" />
+      <module fileurl="file://$PROJECT_DIR$/ivstTest/code/code.iml" filepath="$PROJECT_DIR$/ivstTest/code/code.iml" />
+      <module fileurl="file://$PROJECT_DIR$/external_out_glm_obs/code_3page_fullcode_test2/code_3page_fullcode_test2.iml" filepath="$PROJECT_DIR$/external_out_glm_obs/code_3page_fullcode_test2/code_3page_fullcode_test2.iml" />
+      <module fileurl="file://$PROJECT_DIR$/external_out_glm_obs/code_3page_header_fix_test/code_3page_header_fix_test.iml" filepath="$PROJECT_DIR$/external_out_glm_obs/code_3page_header_fix_test/code_3page_header_fix_test.iml" />
+      <module fileurl="file://$PROJECT_DIR$/external_out_glm_obs/code_639_incremental/code_639_incremental.iml" filepath="$PROJECT_DIR$/external_out_glm_obs/code_639_incremental/code_639_incremental.iml" />
+      <module fileurl="file://$PROJECT_DIR$/external_out_glm_obs/code_incremental_test/code_incremental_test.iml" filepath="$PROJECT_DIR$/external_out_glm_obs/code_incremental_test/code_incremental_test.iml" />
+      <module fileurl="file://$PROJECT_DIR$/external_out_glm_obs/code_test/code_test.iml" filepath="$PROJECT_DIR$/external_out_glm_obs/code_test/code_test.iml" />
+      <module fileurl="file://$PROJECT_DIR$/external_obs_code_roi_tmp/spc-modules/spc-modules-system/src/main/java/com/spc/ivstconv/domain/domain.iml" filepath="$PROJECT_DIR$/external_obs_code_roi_tmp/spc-modules/spc-modules-system/src/main/java/com/spc/ivstconv/domain/domain.iml" />
+      <module fileurl="file://$PROJECT_DIR$/external_obs_code_fused_roi_only/spc-modules/spc-modules-system/src/main/java/com/spc/ivstconv/domain/domain2.iml" filepath="$PROJECT_DIR$/external_obs_code_fused_roi_only/spc-modules/spc-modules-system/src/main/java/com/spc/ivstconv/domain/domain2.iml" />
+      <module fileurl="file://$PROJECT_DIR$/external_obs_code/external_obs_code.iml" filepath="$PROJECT_DIR$/external_obs_code/external_obs_code.iml" />
+      <module fileurl="file://$PROJECT_DIR$/ivstTest/ivstTest.iml" filepath="$PROJECT_DIR$/ivstTest/ivstTest.iml" />
+      <module fileurl="file://$PROJECT_DIR$/external_obs_code_fused_roi_only/spc-modules/spc-modules-system/src/main/java/com/spc/ivstconv/ivstconv.iml" filepath="$PROJECT_DIR$/external_obs_code_fused_roi_only/spc-modules/spc-modules-system/src/main/java/com/spc/ivstconv/ivstconv.iml" />
+      <module fileurl="file://$PROJECT_DIR$/external_obs_code_roi_tmp/spc-modules/spc-modules-system/src/main/java/com/spc/ivstconv/ivstconv2.iml" filepath="$PROJECT_DIR$/external_obs_code_roi_tmp/spc-modules/spc-modules-system/src/main/java/com/spc/ivstconv/ivstconv2.iml" />
+    </modules>
+  </component>
+</project>

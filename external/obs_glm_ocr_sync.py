@@ -4,12 +4,16 @@ from __future__ import annotations
 import argparse
 import asyncio
 import errno
+import gc
 import hashlib
 import json
 import os
+import traceback
 import sys
 import time
 import warnings
+import ctypes
+import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
@@ -35,12 +39,15 @@ from glm_ocr_local_runner import (
     segment_roi_lines,
     should_process,
 )
+from light_ocr_rebuilder import light_clean_text
 from page_detector import parse_header
-from roi_code_rebuilder import build_java_source, cleanup_lines, extract_lines
+from roi_code_rebuilder import extract_lines
 from shared.projection_settings import get_obs_capture_settings, load_projection_settings
 
 
 ARG_DEFAULTS = {
+    "runtime_log_file": "",
+    "start_index": 1,
     "obs_host": "127.0.0.1",
     "obs_port": 4455,
     "obs_password": "",
@@ -52,7 +59,81 @@ ARG_DEFAULTS = {
     "obs_count": 0,
     "obs_interval_ms": 1800,
     "obs_initial_delay_ms": 0,
+    "directml_rebuild_pages": 5,
+    "short_page_cpu_threshold": 4,
+    "directml_restart_gpu_shared_gib": 18.0,
+    "directml_restart_private_gib": 21.0,
+    "directml_max_gpu_shared_gib": 16.0,
+    "directml_max_private_gib": 20.0,
+    "directml_resume_gpu_shared_gib": 12.0,
+    "directml_resume_private_gib": 16.0,
+    "directml_cpu_cooldown_pages": 3,
 }
+GPU_MEMORY_CACHE: Dict[str, object] = {"timestamp": 0.0, "snapshot": None}
+RUNTIME_LOG_HANDLE = None
+
+
+class TeeStream:
+    def __init__(self, *streams):
+        self.streams = [stream for stream in streams if stream is not None]
+
+    def write(self, data):
+        for stream in self.streams:
+            stream.write(data)
+        return len(data)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+    def isatty(self):
+        for stream in self.streams:
+            if hasattr(stream, "isatty") and stream.isatty():
+                return True
+        return False
+
+    @property
+    def encoding(self):
+        for stream in self.streams:
+            if getattr(stream, "encoding", None):
+                return stream.encoding
+        return "utf-8"
+
+
+def configure_runtime_logging(path: str) -> None:
+    global RUNTIME_LOG_HANDLE
+    if not path:
+        return
+    parent = os.path.dirname(path)
+    if parent:
+        ensure_dir(parent)
+    if RUNTIME_LOG_HANDLE is not None and getattr(RUNTIME_LOG_HANDLE, "name", None) == path:
+        return
+    if RUNTIME_LOG_HANDLE is not None:
+        try:
+            RUNTIME_LOG_HANDLE.close()
+        except Exception:
+            pass
+    RUNTIME_LOG_HANDLE = open(path, "a", encoding="utf-8", newline="\n", buffering=1)
+    sys.stdout = TeeStream(sys.__stdout__, RUNTIME_LOG_HANDLE)
+    sys.stderr = TeeStream(sys.__stderr__, RUNTIME_LOG_HANDLE)
+    print("[logging] tee -> %s" % path)
+
+
+class ProcessMemoryCountersEx(ctypes.Structure):
+    _fields_ = [
+        ("cb", ctypes.c_ulong),
+        ("PageFaultCount", ctypes.c_ulong),
+        ("PeakWorkingSetSize", ctypes.c_size_t),
+        ("WorkingSetSize", ctypes.c_size_t),
+        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+        ("PagefileUsage", ctypes.c_size_t),
+        ("PeakPagefileUsage", ctypes.c_size_t),
+        ("PrivateUsage", ctypes.c_size_t),
+    ]
 
 
 def resolve_repo_path(path: str) -> str:
@@ -64,9 +145,228 @@ def resolve_repo_path(path: str) -> str:
     return os.path.abspath(os.path.join(REPO_ROOT, path))
 
 
+def format_duration(seconds: float) -> str:
+    total = max(0, int(round(seconds)))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return "%02d:%02d:%02d" % (hours, minutes, secs)
+
+
+def format_bytes_iec(value: int) -> str:
+    size = float(max(0, int(value)))
+    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+    for unit in units:
+        if size < 1024.0 or unit == units[-1]:
+            if unit == "B":
+                return "%d%s" % (int(size), unit)
+            return "%.2f%s" % (size, unit)
+        size /= 1024.0
+    return "%.2fTiB" % size
+
+
+def get_process_memory_snapshot() -> Dict[str, int]:
+    try:
+        counters = ProcessMemoryCountersEx()
+        counters.cb = ctypes.sizeof(ProcessMemoryCountersEx)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+        psapi.GetProcessMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_ulong]
+        psapi.GetProcessMemoryInfo.restype = ctypes.c_int
+        handle = kernel32.GetCurrentProcess()
+        ok = psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb)
+        if not ok:
+            raise ctypes.WinError(ctypes.get_last_error())
+        return {
+            "working_set": int(counters.WorkingSetSize),
+            "peak_working_set": int(counters.PeakWorkingSetSize),
+            "private_usage": int(counters.PrivateUsage),
+            "pagefile_usage": int(counters.PagefileUsage),
+        }
+    except Exception:
+        return {
+            "working_set": 0,
+            "peak_working_set": 0,
+            "private_usage": 0,
+            "pagefile_usage": 0,
+        }
+
+
+def get_gpu_memory_snapshot(force_refresh: bool = False) -> Dict[str, int]:
+    now = time.perf_counter()
+    cached = GPU_MEMORY_CACHE.get("snapshot")
+    cached_at = float(GPU_MEMORY_CACHE.get("timestamp", 0.0) or 0.0)
+    if not force_refresh and cached is not None and (now - cached_at) < 8.0:
+        return dict(cached)
+    if os.name != "nt":
+        snapshot = {"gpu_dedicated": 0, "gpu_shared": 0}
+        GPU_MEMORY_CACHE["timestamp"] = now
+        GPU_MEMORY_CACHE["snapshot"] = snapshot
+        return snapshot
+    script = (
+        "$targetPid=%d; "
+        "$samples=Get-Counter '\\GPU Process Memory(*)\\Dedicated Usage','\\GPU Process Memory(*)\\Shared Usage'; "
+        "$ded=(($samples.CounterSamples | Where-Object { $_.Path -like '*Dedicated Usage' -and $_.InstanceName -match ('pid_' + $targetPid + '(_|$)') } | Measure-Object CookedValue -Sum).Sum); "
+        "$shr=(($samples.CounterSamples | Where-Object { $_.Path -like '*Shared Usage' -and $_.InstanceName -match ('pid_' + $targetPid + '(_|$)') } | Measure-Object CookedValue -Sum).Sum); "
+        "[pscustomobject]@{gpu_dedicated=[int64]($ded);gpu_shared=[int64]($shr)} | ConvertTo-Json -Compress"
+    ) % os.getpid()
+    try:
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=6,
+            check=False,
+        )
+        stdout = str(completed.stdout or "").strip()
+        if completed.returncode == 0 and stdout:
+            payload = json.loads(stdout)
+            snapshot = {
+                "gpu_dedicated": int(payload.get("gpu_dedicated", 0) or 0),
+                "gpu_shared": int(payload.get("gpu_shared", 0) or 0),
+            }
+        else:
+            snapshot = {"gpu_dedicated": 0, "gpu_shared": 0}
+    except Exception:
+        snapshot = {"gpu_dedicated": 0, "gpu_shared": 0}
+    GPU_MEMORY_CACHE["timestamp"] = now
+    GPU_MEMORY_CACHE["snapshot"] = snapshot
+    return snapshot
+
+
+def print_runtime_status(
+    label: str,
+    started_at: float,
+    current_index: int,
+    total_images: int,
+    extra: Optional[str] = None,
+) -> None:
+    snapshot = get_process_memory_snapshot()
+    gpu_snapshot = get_gpu_memory_snapshot()
+    message = (
+        "[runtime] %s | progress=%s/%s | elapsed=%s | gpu_shared=%s | gpu_dedicated=%s | ws=%s | peak_ws=%s | private=%s"
+        % (
+            label,
+            current_index,
+            total_images,
+            format_duration(time.perf_counter() - started_at),
+            format_bytes_iec(gpu_snapshot.get("gpu_shared", 0)),
+            format_bytes_iec(gpu_snapshot.get("gpu_dedicated", 0)),
+            format_bytes_iec(snapshot.get("working_set", 0)),
+            format_bytes_iec(snapshot.get("peak_working_set", 0)),
+            format_bytes_iec(snapshot.get("private_usage", 0)),
+        )
+    )
+    if extra:
+        message += " | " + str(extra)
+    print(message)
+
+
+def bytes_from_gib(value: float) -> int:
+    return int(max(0.0, float(value)) * (1024.0 ** 3))
+
+
+def should_recycle_directml_for_memory(args: argparse.Namespace) -> Tuple[bool, str]:
+    snapshot = get_process_memory_snapshot()
+    gpu_snapshot = get_gpu_memory_snapshot()
+    max_gpu_shared = bytes_from_gib(float(getattr(args, "directml_max_gpu_shared_gib", 0.0) or 0.0))
+    max_private = bytes_from_gib(float(getattr(args, "directml_max_private_gib", 0.0) or 0.0))
+    gpu_shared = int(gpu_snapshot.get("gpu_shared", 0) or 0)
+    private_usage = int(snapshot.get("private_usage", 0) or 0)
+    if max_gpu_shared > 0 and gpu_shared >= max_gpu_shared:
+        return True, "gpu_shared=%s >= %s" % (format_bytes_iec(gpu_shared), format_bytes_iec(max_gpu_shared))
+    if max_private > 0 and private_usage >= max_private:
+        return True, "private=%s >= %s" % (format_bytes_iec(private_usage), format_bytes_iec(max_private))
+    return False, ""
+
+
+def can_resume_directml_after_cooldown(args: argparse.Namespace) -> Tuple[bool, str]:
+    snapshot = get_process_memory_snapshot()
+    gpu_snapshot = get_gpu_memory_snapshot()
+    resume_gpu_shared = bytes_from_gib(float(getattr(args, "directml_resume_gpu_shared_gib", 0.0) or 0.0))
+    resume_private = bytes_from_gib(float(getattr(args, "directml_resume_private_gib", 0.0) or 0.0))
+    gpu_shared = int(gpu_snapshot.get("gpu_shared", 0) or 0)
+    private_usage = int(snapshot.get("private_usage", 0) or 0)
+    if resume_gpu_shared > 0 and gpu_shared > resume_gpu_shared:
+        return False, "gpu_shared=%s > %s" % (format_bytes_iec(gpu_shared), format_bytes_iec(resume_gpu_shared))
+    if resume_private > 0 and private_usage > resume_private:
+        return False, "private=%s > %s" % (format_bytes_iec(private_usage), format_bytes_iec(resume_private))
+    return True, "ok"
+
+
+def should_restart_process_for_memory(args: argparse.Namespace) -> Tuple[bool, str]:
+    snapshot = get_process_memory_snapshot()
+    gpu_snapshot = get_gpu_memory_snapshot(force_refresh=True)
+    max_gpu_shared = bytes_from_gib(float(getattr(args, "directml_restart_gpu_shared_gib", 0.0) or 0.0))
+    max_private = bytes_from_gib(float(getattr(args, "directml_restart_private_gib", 0.0) or 0.0))
+    gpu_shared = int(gpu_snapshot.get("gpu_shared", 0) or 0)
+    private_usage = int(snapshot.get("private_usage", 0) or 0)
+    if max_gpu_shared > 0 and gpu_shared >= max_gpu_shared:
+        return True, "gpu_shared=%s >= %s" % (format_bytes_iec(gpu_shared), format_bytes_iec(max_gpu_shared))
+    if max_private > 0 and private_usage >= max_private:
+        return True, "private=%s >= %s" % (format_bytes_iec(private_usage), format_bytes_iec(max_private))
+    return False, ""
+
+
+def directml_cpu_cooldown_pages(args: argparse.Namespace) -> int:
+    return max(0, int(getattr(args, "directml_cpu_cooldown_pages", 0) or 0))
+
+
+def _strip_cli_argument(argv: List[str], option_name: str, has_value: bool) -> List[str]:
+    result: List[str] = []
+    skip_next = False
+    for index, item in enumerate(argv):
+        if skip_next:
+            skip_next = False
+            continue
+        if item == option_name:
+            if has_value:
+                skip_next = True
+            continue
+        if has_value and item.startswith(option_name + "="):
+            continue
+        result.append(item)
+    return result
+
+
+def build_restart_argv(args: argparse.Namespace, next_start_index: int) -> List[str]:
+    argv = list(sys.argv[1:])
+    for option_name, has_value in (
+        ("--start-index", True),
+        ("--runtime-log-file", True),
+    ):
+        argv = _strip_cli_argument(argv, option_name, has_value)
+    if getattr(args, "runtime_log_file", ""):
+        argv.extend(["--runtime-log-file", str(args.runtime_log_file)])
+    argv.extend(["--start-index", str(max(1, int(next_start_index)))])
+    script_path = os.path.abspath(sys.argv[0] if sys.argv and sys.argv[0] else __file__)
+    return [sys.executable, script_path] + argv
+
+
+def restart_current_python_process(args: argparse.Namespace, next_start_index: int, reason: str) -> bool:
+    argv = build_restart_argv(args, next_start_index)
+    print(
+        "restarting python process: next_start_index=%s reason=%s command=%s"
+        % (next_start_index, reason, subprocess.list2cmdline(argv))
+    )
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    try:
+        os.execv(sys.executable, argv)
+    except OSError as exc:
+        print("python process restart failed: %s: %s" % (type(exc).__name__, str(exc).strip() or repr(exc)))
+        return False
+    return True
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="OBS capture -> GLM ROI OCR -> merged reconstructed code.")
     parser.add_argument("--config", default=None, help="Optional pipeline JSON config.")
+    parser.add_argument("--runtime-log-file", default="", help="Append runtime stdout/stderr to this log file.")
+    parser.add_argument("--start-index", type=int, default=1, help="1-based image index to start processing from.")
     parser.add_argument("--layout", default="", help="ROI layout JSON path.")
     parser.add_argument("--ocr-output-dir", default="", help="Directory for final merged OCR JSON outputs.")
     parser.add_argument("--code-output-dir", default="", help="Directory for final reconstructed code outputs.")
@@ -104,13 +404,69 @@ def parse_args() -> argparse.Namespace:
         help="When glm-line-mode=full, downscale the code ROI so its longest edge is at most this value. 0 disables.",
     )
     parser.add_argument("--glm-local-files-only", action="store_true", help="Only load local model files.")
+    parser.add_argument(
+        "--directml-rebuild-pages",
+        type=int,
+        default=5,
+        help="When using DirectML, rebuild the recognizer after this many successful pages. 0 disables.",
+    )
+    parser.add_argument(
+        "--short-page-cpu-threshold",
+        type=int,
+        default=4,
+        help="If header lines count is at or below this value, run the page on CPU instead of DirectML. 0 disables.",
+    )
+    parser.add_argument(
+        "--directml-restart-gpu-shared-gib",
+        type=float,
+        default=18.0,
+        help="When shared GPU memory reaches this threshold after a page, restart the Python process and continue from the next page. 0 disables.",
+    )
+    parser.add_argument(
+        "--directml-restart-private-gib",
+        type=float,
+        default=21.0,
+        help="When process private memory reaches this threshold after a page, restart the Python process and continue from the next page. 0 disables.",
+    )
+    parser.add_argument(
+        "--directml-max-gpu-shared-gib",
+        type=float,
+        default=16.0,
+        help="When using DirectML, recycle the recognizer before the next page if shared GPU memory reaches this threshold. 0 disables.",
+    )
+    parser.add_argument(
+        "--directml-max-private-gib",
+        type=float,
+        default=20.0,
+        help="When using DirectML, recycle the recognizer before the next page if process private memory reaches this threshold. 0 disables.",
+    )
+    parser.add_argument(
+        "--directml-resume-gpu-shared-gib",
+        type=float,
+        default=12.0,
+        help="After a high-memory DirectML cooldown, only rebuild DirectML when shared GPU memory is at or below this threshold. 0 disables.",
+    )
+    parser.add_argument(
+        "--directml-resume-private-gib",
+        type=float,
+        default=16.0,
+        help="After a high-memory DirectML cooldown, only rebuild DirectML when process private memory is at or below this threshold. 0 disables.",
+    )
+    parser.add_argument(
+        "--directml-cpu-cooldown-pages",
+        type=int,
+        default=3,
+        help="After a high-memory DirectML event, force this many pages to CPU before trying DirectML again. 0 disables.",
+    )
 
     args = parser.parse_args()
     if args.config:
         apply_config_overrides(args, args.config)
-    validate_required_args(args, parser)
     apply_projection_defaults(args)
     resolve_paths(args)
+    configure_runtime_logging(str(getattr(args, "runtime_log_file", "") or ""))
+    validate_required_args(args, parser)
+    args.start_index = max(1, int(getattr(args, "start_index", 1) or 1))
     if not args.skip_capture and not args.obs_source:
         parser.error("--obs-source is required (or set obs_capture.source in projection config/config file)")
     return args
@@ -146,6 +502,8 @@ def resolve_paths(args: argparse.Namespace) -> None:
     args.ocr_output_dir = resolve_repo_path(args.ocr_output_dir)
     args.code_output_dir = resolve_repo_path(args.code_output_dir)
     args.capture_dir = resolve_repo_path(args.capture_dir) if args.capture_dir else ""
+    if getattr(args, "runtime_log_file", ""):
+        args.runtime_log_file = resolve_repo_path(args.runtime_log_file)
     if args.projection_config:
         args.projection_config = resolve_repo_path(args.projection_config)
     args.glm_model_path = resolve_repo_path(args.glm_model_path)
@@ -206,6 +564,65 @@ def extract_header_text_from_glm(roi_payload: Dict[str, object]) -> str:
     return "\n".join(parts)
 
 
+def compact_structured_lines(lines: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    compacted: List[Dict[str, object]] = []
+    for item in lines:
+        compacted.append(
+            {
+                "index": int(item.get("index", len(compacted) + 1)),
+                "line_no": item.get("line_no"),
+                "line_no_text": item.get("line_no_text"),
+                "continued": bool(item.get("continued", False)),
+                "text": str(item.get("text", "")),
+            }
+        )
+    return compacted
+
+
+def is_exact_solid_image(image: np.ndarray) -> bool:
+    if image.size == 0:
+        return True
+    first_pixel = image.reshape(-1, image.shape[-1])[0]
+    return bool(np.all(image == first_pixel))
+
+
+def compact_roi_payload(roi_payload: Dict[str, object]) -> Dict[str, object]:
+    compact_rois: List[Dict[str, object]] = []
+    for roi in roi_payload.get("rois", []):
+        compact_roi: Dict[str, object] = {"name": roi.get("name")}
+        if "text" in roi:
+            compact_roi["text"] = str(roi.get("text", ""))
+        if "lines" in roi:
+            compact_roi["lines"] = [
+                {"index": int(item.get("index", index + 1)), "text": str(item.get("text", ""))}
+                for index, item in enumerate(roi.get("lines", []))
+            ]
+        compact_rois.append(compact_roi)
+    return {
+        "device": roi_payload.get("device"),
+        "line_mode": roi_payload.get("line_mode"),
+        "line_numbers_enabled": bool(roi_payload.get("line_numbers_enabled", False)),
+        "structured_lines": compact_structured_lines(list(roi_payload.get("structured_lines", []))),
+        "rois": compact_rois,
+    }
+
+
+def compact_header_payload(header: Dict[str, object]) -> Dict[str, object]:
+    return {
+        "file": header.get("file"),
+        "page": list(header.get("page", [])) if header.get("page") else [],
+        "lines": list(header.get("lines", [])) if header.get("lines") else [],
+    }
+
+
+def compact_processing_error(image_ref: str, error: str) -> Dict[str, object]:
+    return {
+        "image": image_ref,
+        "error": error,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+
+
 def maybe_resize_long_edge(image: np.ndarray, max_edge: int) -> np.ndarray:
     if max_edge <= 0:
         return image
@@ -229,6 +646,8 @@ def run_glm_roi(
     max_new_tokens: int,
     full_max_edge: int,
     local_files_only: bool,
+    precomputed_header_text: Optional[str] = None,
+    precomputed_expected_line_count: Optional[int] = None,
 ) -> Dict[str, object]:
     layout = load_json(layout_path)
     image = load_image(image_path)
@@ -237,8 +656,33 @@ def run_glm_roi(
     roi_payloads: List[Dict[str, object]] = []
     code_line_payloads: List[Dict[str, object]] = []
     line_number_payloads: List[Dict[str, object]] = []
+    expected_segmented_line_count: Optional[int] = precomputed_expected_line_count
+
+    header_roi = next((roi for roi in rois if roi.name == "header"), None)
+    if header_roi is not None:
+        header_crop = crop_roi(image, header_roi)
+        header_payload: Dict[str, object] = {
+            "name": header_roi.name,
+            "box": {"x": header_roi.x, "y": header_roi.y, "width": header_roi.width, "height": header_roi.height},
+        }
+        if should_process(target, "header"):
+            header_text = precomputed_header_text
+            if header_text is None:
+                header_text = recognizer.recognize(header_crop, "Text Recognition:", max_new_tokens)
+            header_payload["text"] = header_text
+            if expected_segmented_line_count is None:
+                parsed_header = parse_header(header_text)
+                header_lines = parsed_header.get("lines") or ()
+                if len(header_lines) >= 2:
+                    line_start = int(header_lines[0] or 0)
+                    line_end = int(header_lines[1] or 0)
+                    if line_start > 0 and line_end >= line_start:
+                        expected_segmented_line_count = max(1, line_end - line_start + 1)
+        roi_payloads.append(header_payload)
 
     for roi in rois:
+        if roi.name == "header":
+            continue
         if roi.name == "line_numbers" and not use_line_numbers:
             continue
         if not should_process(target, roi.name):
@@ -250,8 +694,14 @@ def run_glm_roi(
         }
         if roi.name in {"code", "line_numbers"} and line_mode == "segmented":
             line_payloads = []
-            for entry in segment_roi_lines(crop, layout, roi.name):
-                text = recognizer.recognize(entry["image"], "Text Recognition:", max_new_tokens)
+            segmented_entries = segment_roi_lines(crop, layout, roi.name)
+            if expected_segmented_line_count is not None and expected_segmented_line_count > 0:
+                segmented_entries = segmented_entries[:expected_segmented_line_count]
+            for entry in segmented_entries:
+                if is_exact_solid_image(entry["image"]):
+                    text = ""
+                else:
+                    text = recognizer.recognize(entry["image"], "Text Recognition:", max_new_tokens)
                 line_payloads.append({"index": entry["index"], "box": entry["box"], "text": text})
             payload["lines"] = line_payloads
             if roi.name == "code":
@@ -335,9 +785,27 @@ def build_image_key(capture_dir: str, image_path: str) -> str:
     return normalize_rel_path(rel_path)
 
 
+def legacy_gzip_path(path: str) -> str:
+    return path + ".gz" if not str(path).lower().endswith(".gz") else path
+
+
+def output_exists(path: str) -> bool:
+    return os.path.isfile(path) or os.path.isfile(legacy_gzip_path(path))
+
+
+def should_skip_existing_image(state: Dict[str, object], image_key: str, image_output_path: str) -> bool:
+    image_record = state.get("images", {}).get(image_key)
+    if not image_record:
+        return False
+    if str(image_record.get("status", "")).lower() == "error":
+        return False
+    return output_exists(image_output_path)
+
+
 def load_session_state(state_path: str, capture_dir: str) -> Dict[str, object]:
-    if os.path.isfile(state_path):
-        with open(state_path, "r", encoding="utf-8") as handle:
+    existing_path = state_path if os.path.isfile(state_path) else legacy_gzip_path(state_path)
+    if os.path.isfile(existing_path):
+        with open_text(existing_path, "rt") as handle:
             payload = json.load(handle)
         payload.setdefault("version", 2)
         payload.setdefault("capture_dir", capture_dir)
@@ -374,19 +842,22 @@ def refresh_state_pages(state: Dict[str, object]) -> Dict[str, object]:
 
 def save_session_state(state_path: str, state: Dict[str, object]) -> None:
     state["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-    with open(state_path, "w", encoding="utf-8", newline="\n") as handle:
-        json.dump(state, handle, indent=2, ensure_ascii=False)
+    with open_text(state_path, "wt") as handle:
+        json.dump(state, handle, ensure_ascii=False, separators=(",", ":"))
         handle.write("\n")
 
 
-def append_processing_error(state: Dict[str, object], image_path: str, error: str) -> None:
-    state.setdefault("processing_errors", []).append(
-        {
-            "image": os.path.abspath(image_path),
-            "error": error,
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        }
-    )
+def append_processing_error(state: Dict[str, object], image_ref: str, error: str) -> None:
+    state.setdefault("processing_errors", []).append(compact_processing_error(image_ref, error))
+
+
+def open_text(path: str, mode: str):
+    text_mode = mode if "t" in mode else mode + "t"
+    return open(path, text_mode, encoding="utf-8", newline="\n")
+
+
+def compact_whitespace(text: str) -> str:
+    return " ".join(str(text).split())
 
 
 def build_blank_line(index: int, absolute_line_no: int) -> Dict[str, object]:
@@ -438,7 +909,22 @@ def validate_header_metadata(page_header: Dict[str, object]) -> Optional[str]:
 
 
 def assign_absolute_lines(page_header: Dict[str, object], roi_payload: Dict[str, object]) -> Tuple[List[Dict[str, object]], Dict[str, int]]:
-    cleaned_lines = cleanup_lines(extract_lines(roi_payload))
+    extracted_lines = extract_lines(roi_payload)
+    cleaned_lines: List[Dict[str, object]] = []
+    for item in extracted_lines:
+        raw_text = str(item.get("raw_text", ""))
+        cleaned_text = compact_whitespace(light_clean_text(raw_text))
+        cleaned_lines.append(
+            {
+                "index": int(item.get("index", len(cleaned_lines) + 1)),
+                "line_no": item.get("line_no"),
+                "line_no_text": item.get("line_no_text"),
+                "continued": bool(item.get("continued", False)),
+                "raw_text": raw_text,
+                "cleaned_text": cleaned_text,
+                "kind": "blank" if not cleaned_text else "code",
+            }
+        )
     line_range = page_header.get("lines")
     start_line = int(line_range[0]) if line_range else 1
     end_line = int(line_range[1]) if line_range else (start_line + len(cleaned_lines) - 1)
@@ -633,7 +1119,7 @@ def merge_file_pages(file_entry: Dict[str, object]) -> Dict[str, object]:
     missing_pages = infer_missing_page_ranges(file_entry)
     return {
         "ordered_cleaned_lines": ordered_cleaned,
-        "code_text": build_java_source(ordered_cleaned),
+        "code_text": "\n".join(str(item.get("cleaned_text", "")) for item in ordered_cleaned),
         "missing_pages": missing_pages,
     }
 
@@ -653,9 +1139,9 @@ def build_final_payload(file_path: str, file_entry: Dict[str, object], merged: D
             {
                 "page": page["header"].get("page"),
                 "lines": page["header"].get("lines"),
-                "header": page["header"],
+                "header": compact_header_payload(page["header"]),
+                "image": page.get("image_key"),
                 "line_stats": page.get("line_stats", {}),
-                "roi_result": page["roi_payload"],
                 "cleaned_lines": page["cleaned_lines"],
             }
             for page in pages
@@ -667,8 +1153,8 @@ def build_final_payload(file_path: str, file_entry: Dict[str, object], merged: D
 def persist_resolved_config(args: argparse.Namespace, ocr_output_dir: str) -> str:
     path = os.path.join(ocr_output_dir, args.session_name + ".resolved_config.json")
     payload = {k: v for k, v in vars(args).items()}
-    with open(path, "w", encoding="utf-8", newline="\n") as handle:
-        json.dump(payload, handle, indent=2, ensure_ascii=False)
+    with open_text(path, "wt") as handle:
+        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
         handle.write("\n")
     return path
 
@@ -676,9 +1162,6 @@ def persist_resolved_config(args: argparse.Namespace, ocr_output_dir: str) -> st
 def upsert_file_page(
     state: Dict[str, object],
     image_key: str,
-    image_path: str,
-    image_output_path: str,
-    header_text: str,
     header: Dict[str, object],
     roi_payload: Dict[str, object],
 ) -> Optional[str]:
@@ -690,6 +1173,7 @@ def upsert_file_page(
     page_no = int(page_info[0] or 0)
     page_total = int(page_info[1] or 0)
     cleaned_lines, line_stats = assign_absolute_lines(header, roi_payload)
+    compact_payload = compact_roi_payload(roi_payload)
     file_entry = state.setdefault("files", {}).setdefault(file_path, {"page_total": page_total, "pages": {}})
     if page_total > int(file_entry.get("page_total", 0) or 0):
         file_entry["page_total"] = page_total
@@ -699,21 +1183,18 @@ def upsert_file_page(
             {
                 "kind": "page_overwrite",
                 "page": page_no,
-                "previous_image": existing_page.get("image_path"),
-                "new_image": os.path.abspath(image_path),
+                "previous_image": existing_page.get("image_key"),
+                "new_image": image_key,
                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }
         )
     file_entry["pages"][str(page_no)] = {
         "image_key": image_key,
-        "image_path": os.path.abspath(image_path),
-        "image_output_path": image_output_path,
-        "header_text": header_text,
-        "header": header,
+        "header": compact_header_payload(header),
         "page": list(page_info),
         "cleaned_lines": cleaned_lines,
         "line_stats": line_stats,
-        "roi_payload": roi_payload,
+        "roi_payload": compact_payload,
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     return file_path
@@ -721,8 +1202,7 @@ def upsert_file_page(
 
 def write_image_payload(
     image_output_path: str,
-    image_path: str,
-    header_text: str,
+    image_key: str,
     header: Dict[str, object],
     roi_payload: Dict[str, object],
     state_label: str,
@@ -730,16 +1210,15 @@ def write_image_payload(
 ) -> None:
     ensure_dir(os.path.dirname(image_output_path))
     payload: Dict[str, object] = {
-        "image": os.path.abspath(image_path),
+        "image": image_key,
         "status": state_label,
-        "header_text": header_text,
-        "header": header,
-        "roi_result": roi_payload,
+        "header": compact_header_payload(header),
+        "roi_result": compact_roi_payload(roi_payload) if roi_payload else {},
     }
     if error:
         payload["error"] = error
-    with open(image_output_path, "w", encoding="utf-8", newline="\n") as handle:
-        json.dump(payload, handle, indent=2, ensure_ascii=False)
+    with open_text(image_output_path, "wt") as handle:
+        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
         handle.write("\n")
 
 
@@ -759,8 +1238,8 @@ def finalize_file_outputs(
     code_output_path = build_code_output_path(args.code_output_dir, file_path)
     ensure_dir(os.path.dirname(ocr_output_path))
     ensure_dir(os.path.dirname(code_output_path))
-    with open(ocr_output_path, "w", encoding="utf-8", newline="\n") as handle:
-        json.dump(write_payload, handle, indent=2, ensure_ascii=False)
+    with open_text(ocr_output_path, "wt") as handle:
+        json.dump(write_payload, handle, ensure_ascii=False, separators=(",", ":"))
         handle.write("\n")
     with open(code_output_path, "w", encoding="utf-8", newline="\n") as handle:
         handle.write(merged["code_text"].rstrip() + "\n")
@@ -786,14 +1265,90 @@ def build_summary_payload(
 ) -> Dict[str, object]:
     return {
         "capture_dir": capture_dir,
-        "captured_images": [os.path.abspath(path) for path in captured_images],
+        "captured_image_count": len(captured_images),
+        "captured_images_first": build_image_key(capture_dir, captured_images[0]) if captured_images else None,
+        "captured_images_last": build_image_key(capture_dir, captured_images[-1]) if captured_images else None,
         "processed_image_count": len(state.get("images", {})),
         "processing_errors": state.get("processing_errors", []),
         "files": file_summaries,
     }
 
 
+def release_inference_memory(recognizer: Optional[GlmOcrRecognizer]) -> None:
+    if recognizer is None:
+        return
+    try:
+        recognizer.release_temporary_memory()
+    except Exception:
+        gc.collect()
+
+
+def dispose_recognizer(recognizer: Optional[GlmOcrRecognizer]) -> None:
+    if recognizer is None:
+        return
+    try:
+        recognizer.dispose()
+    except Exception:
+        release_inference_memory(recognizer)
+
+
+def build_recognizer(args: argparse.Namespace, device_name: Optional[str] = None) -> GlmOcrRecognizer:
+    return GlmOcrRecognizer(
+        model_path=args.glm_model_path,
+        device_name=device_name or args.glm_device,
+        local_files_only=bool(args.glm_local_files_only),
+    )
+
+
+def run_roi_with_recognizer(
+    args: argparse.Namespace,
+    recognizer: GlmOcrRecognizer,
+    image_path: str,
+    precomputed_header_text: Optional[str] = None,
+    precomputed_expected_line_count: Optional[int] = None,
+) -> Dict[str, object]:
+    return run_glm_roi(
+        recognizer,
+        image_path=image_path,
+        layout_path=args.layout,
+        model_path=args.glm_model_path,
+        target=args.glm_target,
+        line_mode=args.glm_line_mode,
+        max_new_tokens=args.glm_max_new_tokens,
+        full_max_edge=args.glm_full_max_edge,
+        local_files_only=bool(args.glm_local_files_only),
+        precomputed_header_text=precomputed_header_text,
+        precomputed_expected_line_count=precomputed_expected_line_count,
+    )
+
+
+def probe_page_header(
+    recognizer: GlmOcrRecognizer,
+    image_path: str,
+    layout_path: str,
+    max_new_tokens: int,
+) -> Tuple[str, Dict[str, object], Optional[int]]:
+    layout = load_json(layout_path)
+    image = load_image(image_path)
+    rois = build_rois(layout)
+    header_roi = next((roi for roi in rois if roi.name == "header"), None)
+    if header_roi is None:
+        return "", {}, None
+    header_crop = crop_roi(image, header_roi)
+    header_text = recognizer.recognize(header_crop, "Text Recognition:", max_new_tokens)
+    header = parse_header(header_text)
+    header_lines = header.get("lines") or ()
+    expected_line_count = None
+    if len(header_lines) >= 2:
+        line_start = int(header_lines[0] or 0)
+        line_end = int(header_lines[1] or 0)
+        if line_start > 0 and line_end >= line_start:
+            expected_line_count = max(1, line_end - line_start + 1)
+    return header_text, header, expected_line_count
+
+
 async def run_session(args: argparse.Namespace) -> int:
+    run_started_at = time.perf_counter()
     ensure_dir(args.ocr_output_dir)
     ensure_dir(args.code_output_dir)
     capture_dir = args.capture_dir or os.path.join(args.ocr_output_dir, "_captures")
@@ -803,6 +1358,9 @@ async def run_session(args: argparse.Namespace) -> int:
     state_path = build_session_state_path(args.ocr_output_dir, args.session_name)
     state = load_session_state(state_path, capture_dir)
     recognizer: Optional[GlmOcrRecognizer] = None
+    needs_directml_rebuild = False
+    directml_pages_since_rebuild = 0
+    directml_cpu_cooldown_remaining = 0
     capture_index = 0
 
     if not args.skip_capture:
@@ -849,68 +1407,202 @@ async def run_session(args: argparse.Namespace) -> int:
     captured_images = list_captured_images(capture_dir)
     if not captured_images:
         raise RuntimeError("no captured images found in %s" % capture_dir)
+    print(
+        "[session] images=%s skip_capture=%s device=%s line_mode=%s capture_dir=%s start_index=%s"
+        % (len(captured_images), args.skip_capture, args.glm_device, args.glm_line_mode, capture_dir, args.start_index)
+    )
     pending_images = []
-    for image_path in captured_images:
+    for image_path in captured_images[max(args.start_index - 1, 0) :]:
         image_key = build_image_key(capture_dir, image_path)
         image_output_path = build_image_output_path(image_output_dir, capture_dir, image_path)
-        if image_key in state.get("images", {}) and os.path.isfile(image_output_path):
+        if should_skip_existing_image(state, image_key, image_output_path):
             continue
         pending_images.append(image_path)
     if pending_images:
-        recognizer = GlmOcrRecognizer(
-            model_path=args.glm_model_path,
-            device_name=args.glm_device,
-            local_files_only=bool(args.glm_local_files_only),
-        )
+        recognizer = build_recognizer(args)
 
     processing_errors: List[Dict[str, str]] = []
     total_images = len(captured_images)
     for index, image_path in enumerate(captured_images, start=1):
+        if index < args.start_index:
+            continue
+        image_started_at = time.perf_counter()
         image_key = build_image_key(capture_dir, image_path)
         image_output_path = build_image_output_path(image_output_dir, capture_dir, image_path)
-        if image_key in state.get("images", {}) and os.path.isfile(image_output_path):
+        if should_skip_existing_image(state, image_key, image_output_path):
             if index == 1 or index % 10 == 0 or index == total_images:
                 print("skipping %s/%s %s (already processed)" % (index, total_images, os.path.basename(image_path)))
+                print_runtime_status("skip", run_started_at, index, total_images, "image=%s" % image_key)
             continue
         try:
             if index == 1 or index % 10 == 0 or index == total_images:
                 print("processing %s/%s %s" % (index, total_images, os.path.basename(image_path)))
-            if recognizer is None:
-                raise RuntimeError("recognizer not initialized")
-            roi_payload = run_glm_roi(
-                recognizer,
-                image_path=image_path,
-                layout_path=args.layout,
-                model_path=args.glm_model_path,
-                target=args.glm_target,
-                line_mode=args.glm_line_mode,
-                max_new_tokens=args.glm_max_new_tokens,
-                full_max_edge=args.glm_full_max_edge,
-                local_files_only=bool(args.glm_local_files_only),
-            )
+            active_device = recognizer.device_label if recognizer is not None else args.glm_device
+            print_runtime_status("start", run_started_at, index, total_images, "image=%s device=%s" % (image_key, active_device))
+            used_fallback_cpu = False
+            precomputed_header_text: Optional[str] = None
+            precomputed_expected_line_count: Optional[int] = None
+            if args.glm_device == "directml":
+                force_cpu_for_page = False
+                force_cpu_reason = ""
+                if directml_cpu_cooldown_remaining > 0:
+                    force_cpu_for_page = True
+                    force_cpu_reason = "DirectML cooldown active (%s page(s) remaining)" % directml_cpu_cooldown_remaining
+                elif recognizer is not None and recognizer.device_label == "directml":
+                    can_resume_directml, resume_reason = can_resume_directml_after_cooldown(args)
+                    if not can_resume_directml:
+                        force_cpu_for_page = True
+                        force_cpu_reason = "DirectML resume deferred because %s" % resume_reason
+                if (
+                    not force_cpu_for_page
+                    and args.directml_rebuild_pages > 0
+                    and directml_pages_since_rebuild >= int(args.directml_rebuild_pages)
+                ):
+                    print(
+                        "periodic DirectML recycle before %s after %s successful pages"
+                        % (image_key, directml_pages_since_rebuild)
+                    )
+                    dispose_recognizer(recognizer)
+                    recognizer = None
+                    needs_directml_rebuild = True
+                    directml_pages_since_rebuild = 0
+                if not force_cpu_for_page:
+                    recycle_for_memory, recycle_reason = should_recycle_directml_for_memory(args)
+                    if recycle_for_memory:
+                        print("DirectML recycle requested before %s: %s" % (image_key, recycle_reason))
+                        dispose_recognizer(recognizer)
+                        recognizer = None
+                        needs_directml_rebuild = True
+                        directml_pages_since_rebuild = 0
+                    health_ok = False
+                    health_reason = "recognizer not initialized"
+                    if recognizer is not None and recognizer.device_label == "directml" and not needs_directml_rebuild:
+                        health_ok, health_reason = recognizer.check_backend_health()
+                    if recognizer is None or recognizer.device_label != "directml" or needs_directml_rebuild or not health_ok:
+                        if not health_ok and recognizer is not None and recognizer.device_label == "directml":
+                            print("DirectML health check failed before %s: %s" % (image_key, health_reason))
+                        dispose_recognizer(recognizer)
+                        recognizer = None
+                        try:
+                            print("building DirectML recognizer for %s" % image_key)
+                            recognizer = build_recognizer(args, "directml")
+                            needs_directml_rebuild = False
+                        except Exception as rebuild_exc:
+                            rebuild_text = str(rebuild_exc).strip() or (
+                                "%s: %r" % (type(rebuild_exc).__name__, rebuild_exc)
+                            )
+                            print("DirectML rebuild failed before %s: %s" % (image_key, rebuild_text))
+                            recognizer = None
+                            needs_directml_rebuild = True
+                            force_cpu_for_page = True
+                            force_cpu_reason = "DirectML rebuild failed"
+                if (
+                    not force_cpu_for_page
+                    and recognizer is not None
+                    and recognizer.device_label == "directml"
+                    and args.short_page_cpu_threshold > 0
+                ):
+                    try:
+                        precomputed_header_text, probed_header, precomputed_expected_line_count = probe_page_header(
+                            recognizer,
+                            image_path,
+                            args.layout,
+                            args.glm_max_new_tokens,
+                        )
+                    except Exception as probe_exc:
+                        probe_text = str(probe_exc).strip() or ("%s: %r" % (type(probe_exc).__name__, probe_exc))
+                        print("DirectML header probe failed on %s: %s" % (image_key, probe_text))
+                        dispose_recognizer(recognizer)
+                        recognizer = None
+                        needs_directml_rebuild = True
+                        force_cpu_for_page = True
+                        force_cpu_reason = "DirectML header probe failed"
+                    else:
+                        if (
+                            precomputed_expected_line_count is not None
+                            and precomputed_expected_line_count <= int(args.short_page_cpu_threshold)
+                        ):
+                            force_cpu_for_page = True
+                            force_cpu_reason = "short page detected: lines=%s" % precomputed_expected_line_count
+                        else:
+                            probed_header = None
+                if recognizer is None or force_cpu_for_page:
+                    if force_cpu_reason:
+                        print("%s for %s, using CPU for current page" % (force_cpu_reason, image_key))
+                    print("falling back to CPU for current page %s" % image_key)
+                    temp_cpu_recognizer = build_recognizer(args, "cpu")
+                    try:
+                        roi_payload = run_roi_with_recognizer(
+                            args,
+                            temp_cpu_recognizer,
+                            image_path,
+                            precomputed_header_text=precomputed_header_text,
+                            precomputed_expected_line_count=precomputed_expected_line_count,
+                        )
+                        used_fallback_cpu = True
+                    finally:
+                        dispose_recognizer(temp_cpu_recognizer)
+                elif not used_fallback_cpu:
+                    try:
+                        roi_payload = run_roi_with_recognizer(
+                            args,
+                            recognizer,
+                            image_path,
+                            precomputed_header_text=precomputed_header_text,
+                            precomputed_expected_line_count=precomputed_expected_line_count,
+                        )
+                    except Exception as directml_exc:
+                        directml_text = str(directml_exc).strip() or (
+                            "%s: %r" % (type(directml_exc).__name__, directml_exc)
+                        )
+                        print("DirectML failed on %s: %s" % (image_key, directml_text))
+                        dispose_recognizer(recognizer)
+                        recognizer = None
+                        needs_directml_rebuild = True
+                        directml_cpu_cooldown_remaining = max(
+                            directml_cpu_cooldown_remaining,
+                            directml_cpu_cooldown_pages(args),
+                        )
+                        print("retrying %s on CPU" % image_key)
+                        temp_cpu_recognizer = build_recognizer(args, "cpu")
+                        try:
+                            roi_payload = run_roi_with_recognizer(
+                                args,
+                                temp_cpu_recognizer,
+                                image_path,
+                                precomputed_header_text=precomputed_header_text,
+                                precomputed_expected_line_count=precomputed_expected_line_count,
+                            )
+                            used_fallback_cpu = True
+                        finally:
+                            dispose_recognizer(temp_cpu_recognizer)
+            else:
+                if recognizer is None:
+                    raise RuntimeError("recognizer not initialized")
+                roi_payload = run_roi_with_recognizer(args, recognizer, image_path)
             header_text = extract_header_text_from_glm(roi_payload)
             header = parse_header(header_text)
             header_error = validate_header_metadata(header)
-            file_path = upsert_file_page(state, image_key, image_path, image_output_path, header_text, header, roi_payload)
+            file_path = upsert_file_page(state, image_key, header, roi_payload)
             image_record: Dict[str, object] = {
-                "image": os.path.abspath(image_path),
-                "image_key": image_key,
-                "image_output": image_output_path,
-                "header": header,
+                "image": image_key,
+                "header": compact_header_payload(header),
                 "status": "ok" if file_path else "unmatched",
+                "ocr_device": "cpu" if used_fallback_cpu else (recognizer.device_label if recognizer else "cpu"),
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }
+            if used_fallback_cpu:
+                image_record["fallback_from"] = "directml"
             if file_path:
                 page_info = header.get("page") or (0, 0)
                 image_record["file"] = file_path
                 image_record["page"] = list(page_info)
             else:
-                append_processing_error(state, image_path, header_error or "header metadata not recognized")
+                append_processing_error(state, image_key, header_error or "header metadata not recognized")
             state.setdefault("images", {})[image_key] = image_record
             write_image_payload(
                 image_output_path=image_output_path,
-                image_path=image_path,
-                header_text=header_text,
+                image_key=image_key,
                 header=header,
                 roi_payload=roi_payload,
                 state_label=str(image_record["status"]),
@@ -918,28 +1610,111 @@ async def run_session(args: argparse.Namespace) -> int:
             save_session_state(state_path, state)
             if file_path and args.emit_partial:
                 finalize_file_outputs(args, file_path, state["files"][file_path])
+            release_inference_memory(recognizer)
+            if args.glm_device == "directml":
+                if used_fallback_cpu:
+                    directml_pages_since_rebuild = 0
+                    if directml_cpu_cooldown_remaining > 0:
+                        directml_cpu_cooldown_remaining = max(0, directml_cpu_cooldown_remaining - 1)
+                elif recognizer is not None and recognizer.device_label == "directml":
+                    directml_pages_since_rebuild += 1
+                    directml_cpu_cooldown_remaining = 0
+            page_elapsed = time.perf_counter() - image_started_at
+            final_device = "cpu" if used_fallback_cpu else (recognizer.device_label if recognizer is not None else "cpu")
+            print_runtime_status(
+                "done",
+                run_started_at,
+                index,
+                total_images,
+                "image=%s page_elapsed=%s device=%s%s"
+                % (
+                    image_key,
+                    format_duration(page_elapsed),
+                    final_device,
+                    " fallback_from=directml" if used_fallback_cpu else "",
+                ),
+            )
+            if args.glm_device == "directml" and index < total_images:
+                if directml_cpu_cooldown_remaining > 0:
+                    print(
+                        "skipping python restart after %s because DirectML CPU cooldown is active (%s page(s) remaining)"
+                        % (image_key, directml_cpu_cooldown_remaining)
+                    )
+                else:
+                    should_restart, restart_reason = should_restart_process_for_memory(args)
+                    if should_restart:
+                        state.setdefault("events", []).append(
+                            {
+                                "type": "python_restart",
+                                "image": image_key,
+                                "next_index": index + 1,
+                                "reason": restart_reason,
+                                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                            }
+                        )
+                        save_session_state(state_path, state)
+                        print_runtime_status(
+                            "restart",
+                            run_started_at,
+                            index,
+                            total_images,
+                            "image=%s next_index=%s reason=%s" % (image_key, index + 1, restart_reason),
+                        )
+                        dispose_recognizer(recognizer)
+                        recognizer = None
+                        needs_directml_rebuild = True
+                        directml_pages_since_rebuild = 0
+                        restarted = restart_current_python_process(args, index + 1, restart_reason)
+                        if not restarted:
+                            directml_cpu_cooldown_remaining = max(
+                                directml_cpu_cooldown_remaining,
+                                directml_cpu_cooldown_pages(args),
+                            )
+                            state.setdefault("events", []).append(
+                                {
+                                    "type": "python_restart_failed",
+                                    "image": image_key,
+                                    "next_index": index + 1,
+                                    "reason": restart_reason,
+                                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                                }
+                            )
+                            save_session_state(state_path, state)
+                            print(
+                                "continuing in current process after failed restart; forcing CPU cooldown for %s page(s)"
+                                % directml_cpu_cooldown_remaining
+                            )
         except Exception as exc:
-            error_text = str(exc)
-            processing_errors.append({"image": image_path, "error": error_text})
-            append_processing_error(state, image_path, error_text)
+            error_text = str(exc).strip() or ("%s: %r" % (type(exc).__name__, exc))
+            processing_errors.append({"image": image_key, "error": error_text})
+            append_processing_error(state, image_key, error_text)
             state.setdefault("images", {})[image_key] = {
-                "image": os.path.abspath(image_path),
-                "image_key": image_key,
-                "image_output": image_output_path,
+                "image": image_key,
                 "status": "error",
                 "error": error_text,
+                "error_type": type(exc).__name__,
                 "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }
+            print("error on %s: %s" % (image_key, error_text))
+            traceback.print_exc()
             write_image_payload(
                 image_output_path=image_output_path,
-                image_path=image_path,
-                header_text="",
+                image_key=image_key,
                 header={},
                 roi_payload={},
                 state_label="error",
                 error=error_text,
             )
             save_session_state(state_path, state)
+            release_inference_memory(recognizer)
+            print_runtime_status(
+                "error",
+                run_started_at,
+                index,
+                total_images,
+                "image=%s page_elapsed=%s error=%s"
+                % (image_key, format_duration(time.perf_counter() - image_started_at), error_text),
+            )
 
     file_summaries: List[Dict[str, object]] = []
     for file_path, file_entry in sorted(state.get("files", {}).items()):
@@ -951,11 +1726,13 @@ async def run_session(args: argparse.Namespace) -> int:
 
     summary_path = os.path.join(args.ocr_output_dir, args.session_name + ".summary.json")
     summary = build_summary_payload(state, capture_dir, captured_images, file_summaries)
-    with open(summary_path, "w", encoding="utf-8", newline="\n") as handle:
-        json.dump(summary, handle, indent=2, ensure_ascii=False)
+    with open_text(summary_path, "wt") as handle:
+        json.dump(summary, handle, ensure_ascii=False, separators=(",", ":"))
         handle.write("\n")
     config_snapshot = persist_resolved_config(args, args.ocr_output_dir)
     save_session_state(state_path, state)
+    dispose_recognizer(recognizer)
+    print_runtime_status("finished", run_started_at, total_images, total_images, "files=%s" % len(file_summaries))
     print(summary_path)
     print(config_snapshot)
     print(state_path)

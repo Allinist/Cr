@@ -3,6 +3,7 @@
   "ocr_output_dir": "./ivstTest/ocr",
   "code_output_dir": "./ivstTest/code",
   "capture_dir": "./ivstTest/captures",
+  "runtime_log_file": "./ivstTest/logs/run_capture_and_process.runtime.log",
   "skip_capture": false,
   "emit_partial": true,
   "projection_config": "./config/projection.json",
@@ -20,5 +21,12 @@
   "glm_line_mode": "segmented",
   "glm_max_new_tokens": 512,
   "glm_full_max_edge": 0,
-  "glm_local_files_only": true
+  "glm_local_files_only": true,
+  "directml_rebuild_pages": 5,
+  "short_page_cpu_threshold": 4,
+  "directml_restart_gpu_shared_gib": 18.0,
+  "directml_restart_private_gib": 21.0,
+  "directml_resume_gpu_shared_gib": 12.0,
+  "directml_resume_private_gib": 16.0,
+  "directml_cpu_cooldown_pages": 3
 }

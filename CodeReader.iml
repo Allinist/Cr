@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<module type="JAVA_MODULE" version="4">
+  <component name="NewModuleRootManager" inherit-compiler-output="true">
+    <exclude-output />
+    <content url="file://$MODULE_DIR$">
+      <sourceFolder url="file://$MODULE_DIR$/external_out_glm_ocr_directml" isTestSource="false" packagePrefix="com.spc.ivstconv.controller" />
+      <sourceFolder url="file://$MODULE_DIR$/external_out_glm_ocr_local" isTestSource="false" packagePrefix="com.spc.ivstconv.controller" />
+      <sourceFolder url="file://$MODULE_DIR$/external_out_template" isTestSource="false" packagePrefix="com.spc.ivstconv.controller" />
+      <sourceFolder url="file://$MODULE_DIR$/external_out_template_rebuild_test2" isTestSource="false" packagePrefix="com.spc.ivstconv.controller" />
+      <sourceFolder url="file://$MODULE_DIR$/external_out_template_test3" isTestSource="false" packagePrefix="com.spc.ivstconv.controller" />
+      <sourceFolder url="file://$MODULE_DIR$/external_out_template_test3_doc" isTestSource="false" packagePrefix="com.spc.ivstconv.controller" />
+      <sourceFolder url="file://$MODULE_DIR$/external_out_template_test4" isTestSource="false" />
+    </content>
+    <orderEntry type="inheritedJdk" />
+    <orderEntry type="sourceFolder" forTests="false" />
+  </component>
+</module>

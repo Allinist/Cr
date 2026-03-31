@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 from dataclasses import dataclass
@@ -183,6 +184,9 @@ class GlmOcrRecognizer:
             self.model.to(self.device)
         self.model.eval()
         self.torch = torch
+        self.model_path = model_path
+        self.local_files_only = bool(local_files_only)
+        self.requested_device_name = device_name
 
     def recognize(self, image: np.ndarray, prompt: str, max_new_tokens: int) -> str:
         messages = [
@@ -201,13 +205,50 @@ class GlmOcrRecognizer:
             return_dict=True,
             return_tensors="pt",
         )
-        if hasattr(inputs, "to"):
-            inputs = inputs.to(self.device)
-        inputs.pop("token_type_ids", None)
-        with self.torch.no_grad():
-            generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
-        prompt_length = inputs["input_ids"].shape[1]
-        return self.processor.decode(generated_ids[0][prompt_length:], skip_special_tokens=True).strip()
+        generated_ids = None
+        try:
+            if hasattr(inputs, "to"):
+                inputs = inputs.to(self.device)
+            inputs.pop("token_type_ids", None)
+            with self.torch.no_grad():
+                generated_ids = self.model.generate(**inputs, max_new_tokens=max_new_tokens)
+            prompt_length = inputs["input_ids"].shape[1]
+            return self.processor.decode(generated_ids[0][prompt_length:], skip_special_tokens=True).strip()
+        finally:
+            del messages
+            if generated_ids is not None:
+                del generated_ids
+            if inputs is not None:
+                del inputs
+            self.release_temporary_memory()
+
+    def release_temporary_memory(self) -> None:
+        try:
+            if self.device_label == "cuda" and self.torch.cuda.is_available():
+                self.torch.cuda.empty_cache()
+        except Exception:
+            pass
+        gc.collect()
+
+    def check_backend_health(self) -> Tuple[bool, str]:
+        try:
+            probe = self.torch.ones((2, 2), device=self.device)
+            probe = probe + 1
+            _ = probe.sum().item()
+            del probe
+            self.release_temporary_memory()
+            return True, "ok"
+        except Exception as exc:
+            return False, str(exc).strip() or ("%s: %r" % (type(exc).__name__, exc))
+
+    def dispose(self) -> None:
+        try:
+            if hasattr(self, "model"):
+                del self.model
+            if hasattr(self, "processor"):
+                del self.processor
+        finally:
+            self.release_temporary_memory()
 
 
 def crop_roi(image: np.ndarray, roi: Roi) -> np.ndarray:

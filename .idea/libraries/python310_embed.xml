@@ -1,0 +1,9 @@
+<component name="libraryTable">
+  <library name="python310_embed">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/tools/python310_embed.zip!/" />
+    </CLASSES>
+    <JAVADOC />
+    <SOURCES />
+  </library>
+</component>

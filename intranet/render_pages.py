@@ -282,7 +282,12 @@ def render_terminal(
     warned_width = False
     color_prefix = COLOR_SCHEMES.get(color_scheme, COLOR_SCHEMES["black-on-white"])
     total_manifest_pages = manifest_total_pages if manifest_total_pages is not None else len(pages)
+    interval_seconds = max(dwell_ms, 0) / 1000.0
+    next_render_at = time.perf_counter()
     for index, page in enumerate(pages, 1):
+        now = time.perf_counter()
+        if now < next_render_at:
+            time.sleep(next_render_at - now)
         manifest_page_index = start_page + index - 1
         rendered_page = format_page(page, line_numbers=line_numbers)
         if clear_screen_enabled:
@@ -346,7 +351,7 @@ def render_terminal(
             sys.stdout.write("\n" * remaining_lines)
         sys.stdout.write(ANSI_RESET)
         sys.stdout.flush()
-        time.sleep(max(dwell_ms, 0) / 1000.0)
+        next_render_at += interval_seconds
     return 0
 
 
