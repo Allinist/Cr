@@ -112,6 +112,11 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Start playback from the Nth page in manifest order (1-based).",
     )
+    parser.add_argument(
+        "--page-list",
+        default="",
+        help="Specific manifest pages to render, for example: 900,1042,1053,1172,819-828",
+    )
     args = parser.parse_args()
     apply_projection_defaults(args)
     return args
@@ -187,6 +192,40 @@ def filter_pages_by_missing_report(pages: List[Dict[str, object]], report_path: 
             filtered.append(page)
             seen.add(key)
     return filtered
+
+
+def parse_page_selection(raw_value: str) -> List[int]:
+    selected: List[int] = []
+    text = str(raw_value or "").strip()
+    if not text:
+        return selected
+    for token in text.split(","):
+        part = token.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_text, end_text = part.split("-", 1)
+            start = int(start_text.strip())
+            end = int(end_text.strip())
+            if end < start:
+                raise ValueError("invalid range %r: end must be >= start" % part)
+            selected.extend(range(start, end + 1))
+            continue
+        selected.append(int(part))
+    return selected
+
+
+def filter_pages_by_page_list(pages: List[Dict[str, object]], raw_page_list: str) -> List[Dict[str, object]]:
+    selected = parse_page_selection(raw_page_list)
+    if not selected:
+        return pages
+    ordered: List[Dict[str, object]] = []
+    page_index = {index: page for index, page in enumerate(pages, 1)}
+    for manifest_page in selected:
+        page = page_index.get(int(manifest_page))
+        if page is not None:
+            ordered.append(page)
+    return ordered
 
 
 def format_page(page: Dict[str, object], line_numbers: str = "none") -> str:
@@ -362,6 +401,8 @@ def main() -> int:
     pages = load_pages(args.manifest)
     if args.missing_report:
         pages = filter_pages_by_missing_report(pages, args.missing_report)
+    if args.page_list:
+        pages = filter_pages_by_page_list(pages, args.page_list)
     manifest_total_pages = len(pages)
     if args.start_page > 1:
         pages = pages[args.start_page - 1 :]

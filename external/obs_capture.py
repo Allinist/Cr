@@ -18,7 +18,7 @@ import json
 import os
 import sys
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import websockets
 
@@ -35,7 +35,42 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ws-max-size-mb", type=int, default=128, help="WebSocket max message size in MB.")
     parser.add_argument("--count", type=int, default=1, help="Number of screenshots to capture.")
     parser.add_argument("--interval-ms", type=int, default=1500, help="Capture interval.")
-    return parser.parse_args()
+    parser.add_argument("--start-index", type=int, default=1, help="Starting number for output file names.")
+    parser.add_argument("--index-width", type=int, default=5, help="Zero-padding width for output file names.")
+    parser.add_argument(
+        "--file-numbers",
+        default="",
+        help="Explicit output file numbers, for example: 900,1042,1053,1172,819-828",
+    )
+    args = parser.parse_args()
+    explicit_numbers = parse_number_list(args.file_numbers)
+    if explicit_numbers:
+        if args.count == 1:
+            args.count = len(explicit_numbers)
+        elif args.count != len(explicit_numbers):
+            parser.error("--count must match the number of values in --file-numbers")
+    return args
+
+
+def parse_number_list(raw_value: str) -> List[int]:
+    numbers: List[int] = []
+    text = str(raw_value or "").strip()
+    if not text:
+        return numbers
+    for token in text.split(","):
+        part = token.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_text, end_text = part.split("-", 1)
+            start = int(start_text.strip())
+            end = int(end_text.strip())
+            if end < start:
+                raise ValueError("invalid range %r: end must be >= start" % part)
+            numbers.extend(range(start, end + 1))
+            continue
+        numbers.append(int(part))
+    return numbers
 
 
 class ObsClient:
@@ -157,13 +192,15 @@ def ensure_dir(path: str) -> None:
         os.makedirs(path)
 
 
-def build_capture_path(out_dir: str, image_format: str, capture_index: int) -> str:
-    filename = "capture_%s_%03d.%s" % (int(time.time()), capture_index, image_format)
+def build_capture_path(out_dir: str, image_format: str, capture_index: int, index_width: int = 5) -> str:
+    safe_width = max(1, int(index_width))
+    filename = ("%0" + str(safe_width) + "d.%s") % (int(capture_index), image_format)
     return os.path.join(out_dir, filename)
 
 
 async def run_capture(args: argparse.Namespace) -> int:
     ensure_dir(args.out_dir)
+    explicit_numbers = parse_number_list(args.file_numbers)
     async with ObsClient(args.host, args.port, args.password, args.ws_max_size_mb * 1024 * 1024) as client:
         interval_seconds = max(args.interval_ms, 0) / 1000.0
         next_capture_at = time.perf_counter()
@@ -172,7 +209,8 @@ async def run_capture(args: argparse.Namespace) -> int:
             if now < next_capture_at:
                 await asyncio.sleep(next_capture_at - now)
             payload = await capture_once(client, args.source, args.image_format, args.image_width)
-            path = build_capture_path(args.out_dir, args.image_format, index + 1)
+            file_number = explicit_numbers[index] if explicit_numbers else args.start_index + index
+            path = build_capture_path(args.out_dir, args.image_format, file_number, args.index_width)
             with open(path, "wb") as handle:
                 handle.write(payload)
             print(path)
