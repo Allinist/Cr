@@ -1,0 +1,23 @@
+{
+  "input_dir": "E:/Personal/1spc-modules",
+  "layout": "./NVIDIA/config/template_roi_layout.glm_ocr.1920x1080.sample.json",
+  "ocr_output_dir": "E:/Personal/glm_ocr_nvidia/ocr",
+  "code_output_dir": "E:/Personal/glm_ocr_nvidia/code",
+  "session_name": "nvidia_glm_roi_session",
+  "start_index": 1,
+  "recursive": false,
+  "skip_existing": true,
+  "emit_partial": true,
+  "rebuild_pages": 0,
+  "glm_model_path": "./external_models/GLM-OCR",
+  "glm_device": "cuda",
+  "glm_target": "all",
+  "glm_line_mode": "segmented",
+  "glm_max_new_tokens": 512,
+  "header_max_new_tokens": 512,
+  "code_max_new_tokens": 512,
+  "footer_max_new_tokens": 512,
+  "skip_footer_ocr": true,
+  "glm_full_max_edge": 0,
+  "glm_local_files_only": true
+}

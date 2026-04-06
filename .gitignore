@@ -8,3 +8,6 @@ external_obs*
 screenshots
 tools
 ivstTest
+NVIDIA/out
+NVIDIA/test_inputs
+NVIDIA/python*

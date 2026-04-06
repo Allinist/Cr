@@ -1,0 +1,11 @@
+{
+  "input_dir": "E:/Personal/1spc-modules",
+  "ocr_output_dir": "./NVIDIA/out/full_image/ocr",
+  "code_output_dir": "./NVIDIA/out/full_image/code",
+  "session_name": "nvidia_glm_full_image_session",
+  "start_index": 1,
+  "glm_model_path": "./external_models/GLM-OCR",
+  "glm_device": "cuda",
+  "glm_local_files_only": true,
+  "max_new_tokens": 2048
+}

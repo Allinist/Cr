@@ -1,0 +1,10 @@
+numpy
+opencv-python
+pillow
+pyyaml
+requests
+safetensors
+transformers
+accelerate
+sentencepiece
+huggingface_hub[cli]

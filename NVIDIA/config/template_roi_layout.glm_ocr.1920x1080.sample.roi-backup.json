@@ -1,0 +1,52 @@
+{
+  "reference_image": "E:/Personal/1spc-modules/00001.jpg",
+  "alignment": {
+    "mode": "none"
+  },
+  "line_numbers": {
+    "enabled": false,
+    "min_non_empty_ratio": 0.2
+  },
+  "rois": [
+    {
+      "name": "header",
+      "x": 0,
+      "y": 0,
+      "width": 1920,
+      "height": 155
+    },
+    {
+      "name": "code",
+      "x": 48,
+      "y": 155,
+      "width": 1872,
+      "height": 860
+    },
+    {
+      "name": "footer",
+      "x": 0,
+      "y": 1015,
+      "width": 1920,
+      "height": 65
+    }
+  ],
+  "recognizer": {
+    "type": "glm_ocr_local",
+    "model_path": "./external_models/GLM-OCR",
+    "local_files_only": true,
+    "device": "cuda"
+  },
+  "segmentation": {
+    "expected_line_count": 40,
+    "code_top_inset": 5,
+    "code_bottom_inset": 4,
+    "code_start_shift_px": 0,
+    "code_line_height_scale": 1.0,
+    "code_line_height_shrink_px": 0,
+    "code_center_squeeze_px": 0,
+    "code_left_inset": 0,
+    "code_right_inset": 0,
+    "line_padding_y": 2,
+    "line_padding_x": 2
+  }
+}
