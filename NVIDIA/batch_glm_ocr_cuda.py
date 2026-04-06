@@ -582,6 +582,61 @@ def write_control_file(control_path: str, payload: Dict[str, object]) -> None:
         handle.write("\n")
 
 
+def append_log_line(log_path: str, level: str, message: str) -> None:
+    ensure_dir(os.path.dirname(log_path))
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+    with open(log_path, "a", encoding="utf-8", newline="\n") as handle:
+        handle.write("[%s] [%s] %s\n" % (timestamp, level, message))
+
+
+def analyze_file_pagination(file_path: str, file_entry: Dict[str, object]) -> List[str]:
+    warnings: List[str] = []
+    pages = file_entry.get("pages", {}) or {}
+    if not pages:
+        return warnings
+    recognized_pages = sorted(int(page) for page in pages.keys() if int(page) > 0)
+    if not recognized_pages:
+        return warnings
+    page_total = int(file_entry.get("page_total", 0) or 0)
+    header_totals = sorted(
+        {
+            int((page_entry.get("header", {}).get("page") or [0, 0])[1] or 0)
+            for page_entry in pages.values()
+            if int((page_entry.get("header", {}).get("page") or [0, 0])[1] or 0) > 0
+        }
+    )
+    if len(header_totals) > 1:
+        warnings.append("file=%s inconsistent page_total values in headers: %s" % (file_path, header_totals))
+    expected_total = page_total or (header_totals[-1] if header_totals else 0)
+    if expected_total > 0:
+        missing_pages = [page for page in range(1, expected_total + 1) if page not in recognized_pages]
+        if missing_pages:
+            warnings.append(
+                "file=%s missing pages within file pagination: expected=1-%s recognized=%s missing=%s"
+                % (file_path, expected_total, recognized_pages, missing_pages)
+            )
+        if recognized_pages and recognized_pages[-1] > expected_total:
+            warnings.append(
+                "file=%s recognized page exceeds declared total: max_page=%s declared_total=%s"
+                % (file_path, recognized_pages[-1], expected_total)
+            )
+    for page_key, page_entry in sorted(pages.items(), key=lambda item: int(item[0])):
+        header_page = page_entry.get("header", {}).get("page") or [0, 0]
+        header_page_no = int(header_page[0] or 0) if len(header_page) >= 1 else 0
+        header_page_total = int(header_page[1] or 0) if len(header_page) >= 2 else 0
+        if header_page_no and header_page_no != int(page_key):
+            warnings.append(
+                "file=%s stored page key %s does not match header page number %s"
+                % (file_path, page_key, header_page_no)
+            )
+        if expected_total > 0 and header_page_total > 0 and header_page_total != expected_total:
+            warnings.append(
+                "file=%s page %s declares total=%s but file total=%s"
+                % (file_path, page_key, header_page_total, expected_total)
+            )
+    return warnings
+
+
 def install_interrupt_handler() -> None:
     def _handler(signum, frame):  # pragma: no cover - signal timing is runtime-dependent
         INTERRUPT_STATE["count"] = int(INTERRUPT_STATE.get("count", 0) or 0) + 1
@@ -780,6 +835,8 @@ def main() -> int:
     ensure_dir(image_output_dir)
     state_path = build_session_state_path(args.ocr_output_dir, args.session_name)
     control_path = args.control_output or os.path.join(args.ocr_output_dir, args.session_name + ".control.json")
+    error_log_path = os.path.join(args.ocr_output_dir, args.session_name + ".errors.log")
+    warning_log_path = os.path.join(args.ocr_output_dir, args.session_name + ".warnings.log")
     state = load_session_state(state_path, args.input_dir)
     image_paths = list_input_images(args.input_dir, bool(args.recursive))
     if not image_paths:
@@ -907,6 +964,7 @@ def main() -> int:
                 file_path = upsert_file_page(state, image_key, header, roi_payload)
                 if file_path is None and header_error:
                     append_processing_error(state, image_key, header_error)
+                    append_log_line(error_log_path, "ERROR", "image=%s header=%s" % (image_key, header_error))
                 state.setdefault("images", {})[image_key] = build_image_record(
                     image_key=image_key,
                     header=header,
@@ -963,6 +1021,7 @@ def main() -> int:
                 error_text = str(exc).strip() or ("%s: %r" % (type(exc).__name__, exc))
                 processing_errors.append({"image": image_key, "error": error_text})
                 append_processing_error(state, image_key, error_text)
+                append_log_line(error_log_path, "ERROR", "image=%s %s" % (image_key, error_text))
                 state.setdefault("images", {})[image_key] = {
                     "image": image_key,
                     "status": "error",
@@ -1006,17 +1065,25 @@ def main() -> int:
                 raise ImmediateStopRequested("force stop requested after current image")
 
         file_summaries: List[Dict[str, object]] = []
+        pagination_warnings: List[str] = []
         for file_path, file_entry in sorted(state.get("files", {}).items()):
             page_total = int(file_entry.get("page_total", 0) or 0)
             recognized_pages = sorted(int(page) for page in file_entry.get("pages", {}).keys() if int(page) > 0)
             is_complete = bool(page_total) and recognized_pages == list(range(1, page_total + 1))
+            current_warnings = analyze_file_pagination(file_path, file_entry)
+            pagination_warnings.extend(current_warnings)
+            for warning_text in current_warnings:
+                append_log_line(warning_log_path, "WARN", warning_text)
             if is_complete or bool(args.emit_partial):
                 file_summaries.append(finalize_file_outputs(args, file_path, file_entry))
 
         summary_path = os.path.join(args.ocr_output_dir, args.session_name + ".summary.json")
+        summary_payload = build_summary_payload(state, args.input_dir, image_paths, file_summaries)
+        summary_payload["processing_errors"] = processing_errors
+        summary_payload["pagination_warnings"] = pagination_warnings
         with open(summary_path, "w", encoding="utf-8", newline="\n") as handle:
             json.dump(
-                build_summary_payload(state, args.input_dir, image_paths, file_summaries),
+                summary_payload,
                 handle,
                 ensure_ascii=False,
                 separators=(",", ":"),
@@ -1040,8 +1107,8 @@ def main() -> int:
             build_control_payload(args, next_start_index=next_start_index, total_images=len(image_paths), status=final_status),
         )
         print(
-            "[finished] elapsed=%.2fs summary=%s metrics=%s control=%s"
-            % (time.perf_counter() - run_started_at, summary_path, metrics_path, control_path)
+            "[finished] elapsed=%.2fs summary=%s metrics=%s control=%s warnings=%s errors=%s"
+            % (time.perf_counter() - run_started_at, summary_path, metrics_path, control_path, warning_log_path, error_log_path)
         )
         print(config_snapshot)
         print(state_path)
